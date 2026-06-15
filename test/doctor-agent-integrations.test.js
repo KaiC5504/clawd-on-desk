@@ -982,6 +982,35 @@ describe("checkAgentIntegrations", () => {
     assert.strictEqual(detail.hookCommandIssue, "scriptPath-missing");
   });
 
+  it("validates the kimi-code config when the legacy file is absent", () => {
+    const root = makeTempDir();
+    const legacyParent = path.join(root, ".kimi");
+    const kimiCodeParent = path.join(root, ".kimi-code");
+    const descriptor = baseDescriptor({
+      agentId: "kimi-cli",
+      marker: "kimi-hook.js",
+      configMode: "toml-text",
+      parentDir: legacyParent,
+      configPath: path.join(legacyParent, "config.toml"),
+      altParentDir: kimiCodeParent,
+      altConfigPath: path.join(kimiCodeParent, "config.toml"),
+    });
+    // Legacy ~/.kimi/config.toml is intentionally absent; only the new
+    // ~/.kimi-code config exists and carries a valid Clawd hook command.
+    fs.mkdirSync(kimiCodeParent, { recursive: true });
+    fs.writeFileSync(
+      descriptor.altConfigPath,
+      '[[hooks]]\nevent = "Stop"\ncommand = \'"node" "/x/kimi-hook.js"\'\n',
+      "utf8"
+    );
+
+    const detail = runOne(descriptor, {
+      validateCommand: () => ({ ok: true, nodeBin: "/node", scriptPath: "/x/kimi-hook.js" }),
+    });
+    assert.strictEqual(detail.status, "ok");
+    assert.strictEqual(detail.configPath, descriptor.altConfigPath);
+  });
+
   it("turns Codex ok into warning when hooks=false", () => {
     const descriptor = codexDescriptor();
     writeJson(descriptor.configPath, codexHooksConfig(["Stop"]));

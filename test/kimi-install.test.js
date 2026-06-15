@@ -450,4 +450,20 @@ command = 'CLAWD_KIMI_PERMISSION_MODE=suspect "/usr/bin/node" "/some/path/kimi-h
     assert.ok(content.includes("CLAWD_KIMI_PERMISSION_MODE=explicit"));
     assert.ok(!content.includes("CLAWD_KIMI_PERMISSION_MODE=suspect"));
   });
+
+  it("resolves the kimi-code parent dir from $KIMI_CODE_HOME when set", () => {
+    const { resolveKimiCodeParentDir } = require("../hooks/kimi-install");
+    assert.strictEqual(
+      resolveKimiCodeParentDir({ KIMI_CODE_HOME: "  /custom/kc  " }),
+      path.resolve("/custom/kc")
+    );
+  });
+
+  it("falls back to ~/.kimi-code when $KIMI_CODE_HOME is empty/unset", () => {
+    const { resolveKimiCodeParentDir, DEFAULT_KIMI_CODE_PARENT_DIR } = require("../hooks/kimi-install");
+    assert.strictEqual(resolveKimiCodeParentDir({}), DEFAULT_KIMI_CODE_PARENT_DIR);
+    assert.strictEqual(resolveKimiCodeParentDir({ KIMI_CODE_HOME: "   " }), DEFAULT_KIMI_CODE_PARENT_DIR);
+    assert.strictEqual(DEFAULT_KIMI_CODE_PARENT_DIR, path.join(os.homedir(), ".kimi-code"));
+  });
+
 });

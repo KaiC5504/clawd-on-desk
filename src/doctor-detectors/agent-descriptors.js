@@ -132,6 +132,8 @@ const AGENT_DESCRIPTORS = Object.freeze([
     eventSource: agentEventSource("kimi-cli"),
     parentDir: kimi.DEFAULT_PARENT_DIR,
     configPath: kimi.DEFAULT_CONFIG_PATH,
+    altParentDir: kimi.DEFAULT_KIMI_CODE_PARENT_DIR,
+    altConfigPath: kimi.DEFAULT_KIMI_CODE_CONFIG_PATH,
     configMode: "toml-text",
     autoInstall: true,
     marker: "kimi-hook.js",

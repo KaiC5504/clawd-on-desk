@@ -57,6 +57,7 @@ bash test-oneshot-gate.sh [state] [seconds]
 
 新安装默认只把 Claude Code 和 Codex 标记为已安装并启用；其他 agent 默认未安装、未启用。正常启动时，Clawd 只会为 `integrationInstalled=true` 且 `enabled=true` 的 agent 自动同步 Claude / Codex / Copilot / Gemini / Antigravity / Cursor / CodeBuddy / Kiro / Kimi / Qwen / CodeWhale / Qoder / Reasonix hooks、opencode / OpenClaw / Hermes plugins 和 Pi extension。Settings Agent 页的 Install 会安装并启用该集成；Uninstall 会卸载 Clawd 管理的 hook/plugin/extension，并同时把该 agent 设为未安装、未启用。单独关闭 enabled 只会跳过启动同步并屏蔽事件/权限入口，不卸载用户已有 hooks / plugins / extensions；重新启用未安装 agent 只打开事件入口，不会写本机集成文件。手动安装命令主要用于调试、重装或远程部署。
 Copilot CLI 同步走 `<COPILOT_HOME 或 ~/.copilot>/hooks/hooks.json`，marker-based 增量合并只接管含 `copilot-hook.js` 标记的条目，用户其他 entry / 其他 `hooks/*.json` 文件原样保留；hooks.json 或 `settings.json` 顶层 `disableAllHooks: true` 时 doctor 报 warning（不挂 Fix 按钮）。详见 `docs/guides/copilot-setup.md`。
+Kimi 同步同时写入 `~/.kimi/config.toml`（旧版 Python `kimi`）与 `~/.kimi-code/config.toml`（新版 TypeScript `kimi-code`，可用 `$KIMI_CODE_HOME` 覆盖），按目录是否存在分别跳过；安装检测、Doctor 校验与卸载都覆盖这两个路径（#478）。
 
 ## Read These Docs
 

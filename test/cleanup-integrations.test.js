@@ -170,4 +170,29 @@ describe("cleanupIntegrations", () => {
       fs.rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("removes Clawd Kimi hooks from both ~/.kimi and ~/.kimi-code", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-cleanup-kimi-"));
+    const homeDir = path.join(root, "home");
+    const kimi = require("../hooks/kimi-install");
+    const legacyConfig = path.join(homeDir, ".kimi", "config.toml");
+    const kimiCodeConfig = path.join(homeDir, ".kimi-code", "config.toml");
+    fs.mkdirSync(path.dirname(legacyConfig), { recursive: true });
+    fs.mkdirSync(path.dirname(kimiCodeConfig), { recursive: true });
+    const env = { HOME: homeDir, USERPROFILE: homeDir };
+    kimi.registerKimiHooksAllTargets({ silent: true, nodeBin: "/usr/local/bin/node", env });
+
+    try {
+      assert.ok(fs.readFileSync(legacyConfig, "utf8").includes("kimi-hook.js"));
+      assert.ok(fs.readFileSync(kimiCodeConfig, "utf8").includes("kimi-hook.js"));
+
+      const result = cleanupIntegrations({ homeDir, backup: false, silent: true, hermesCommand: false });
+      assert.strictEqual(result.summary.failed, 0);
+
+      assert.ok(!fs.readFileSync(legacyConfig, "utf8").includes("kimi-hook.js"));
+      assert.ok(!fs.readFileSync(kimiCodeConfig, "utf8").includes("kimi-hook.js"));
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

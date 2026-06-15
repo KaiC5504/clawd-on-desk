@@ -11,7 +11,7 @@ const { unregisterCursorHooks } = require("./cursor-install");
 const { unregisterCopilotHooks } = require("./copilot-install");
 const { unregisterCodeBuddyHooks } = require("./codebuddy-install");
 const { unregisterKiroHooks } = require("./kiro-install");
-const { unregisterKimiHooks } = require("./kimi-install");
+const { unregisterKimiHooksAllTargets } = require("./kimi-install");
 const { unregisterQwenCodeHooks } = require("./qwen-code-install");
 const { unregisterCodewhaleHooks } = require("./codewhale-install");
 const { unregisterCodexCommandHooks } = require("./codex-install-utils");
@@ -152,6 +152,7 @@ function buildCleanupOptionsForHome(homeDirInput, options = {}) {
       },
       "kimi-cli": {
         ...common,
+        env,
         settingsPath: path.join(homeDir, ".kimi", "config.toml"),
       },
       "qwen-code": {
@@ -210,7 +211,10 @@ const AGENT_CLEANERS = Object.freeze({
   "copilot-cli": unregisterCopilotHooks,
   codebuddy: unregisterCodeBuddyHooks,
   "kiro-cli": unregisterKiroHooks,
-  "kimi-cli": unregisterKimiHooks,
+  "kimi-cli": (opts) => unregisterKimiHooksAllTargets({
+    ...opts,
+    env: opts.env || buildTargetEnv(normalizeHomeDir(opts.homeDir), opts),
+  }),
   "qwen-code": unregisterQwenCodeHooks,
   codewhale: unregisterCodewhaleHooks,
   codex: unregisterCodexCommandHooks,

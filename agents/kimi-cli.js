@@ -1,5 +1,5 @@
 // Kimi CLI agent configuration
-// Hook-only integration via ~/.kimi/config.toml
+// Hook-only integration via ~/.kimi/config.toml or ~/.kimi-code/config.toml
 
 module.exports = {
   id: "kimi-cli",

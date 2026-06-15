@@ -202,7 +202,7 @@ describe("integration sync runtime", () => {
         agentId: "kimi-cli",
         ctxKey: "syncKimiHooksImpl",
         modulePath: "../hooks/kimi-install.js",
-        exportName: "registerKimiHooks",
+        exportName: "registerKimiHooksAllTargets",
         reason: "kimi-not-installed",
       },
       {

@@ -871,7 +871,11 @@ function checkCopilotHooksMode(descriptor, options) {
 }
 
 function checkTomlTextMode(descriptor, options) {
-  if (!fileExists(options.fs, descriptor.configPath)) {
+  const candidates = [descriptor.configPath, descriptor.altConfigPath]
+    .filter(Boolean)
+    .filter((p) => fileExists(options.fs, p));
+
+  if (candidates.length === 0) {
     return makeDetail(descriptor, "not-connected", {
       level: "warning",
       parentDirExists: true,
@@ -881,25 +885,34 @@ function checkTomlTextMode(descriptor, options) {
     });
   }
 
-  let text;
-  try {
-    text = options.fs.readFileSync(descriptor.configPath, "utf8");
-  } catch (err) {
-    return makeDetail(descriptor, "config-corrupt", {
-      level: "warning",
+  // Prefer the first candidate whose validation passes; otherwise report the
+  // first candidate's failure so the user sees an actionable path.
+  let fallback = null;
+  for (const configPath of candidates) {
+    let text;
+    try {
+      text = options.fs.readFileSync(configPath, "utf8");
+    } catch (err) {
+      const corrupt = makeDetail(descriptor, "config-corrupt", {
+        level: "warning",
+        parentDirExists: true,
+        configFileExists: true,
+        configPath,
+        detail: err && err.message ? err.message : "config read failed",
+      });
+      if (!fallback) fallback = corrupt;
+      continue;
+    }
+    const detail = {
+      ...validateCommandList({ ...descriptor, configPath }, findKimiHookCommands(text, descriptor.marker), options),
       parentDirExists: true,
       configFileExists: true,
-      configPath: descriptor.configPath,
-      detail: err && err.message ? err.message : "config read failed",
-    });
+      configPath,
+    };
+    if (detail.status === "ok") return detail;
+    if (!fallback) fallback = detail;
   }
-
-  return {
-    ...validateCommandList(descriptor, findKimiHookCommands(text, descriptor.marker), options),
-    parentDirExists: true,
-    configFileExists: true,
-    configPath: descriptor.configPath,
-  };
+  return fallback;
 }
 
 function unescapeTomlDoubleQuotedValue(value) {
@@ -1675,7 +1688,11 @@ function checkAgent(descriptor, options) {
     });
   }
 
-  const parentDirExists = descriptor.parentDir ? dirExists(options.fs, descriptor.parentDir) : false;
+  // Kimi can live under either ~/.kimi or the new ~/.kimi-code; treat the
+  // integration as present if either parent dir exists (#478).
+  const parentDirExists =
+    (descriptor.parentDir && dirExists(options.fs, descriptor.parentDir)) ||
+    (descriptor.altParentDir && dirExists(options.fs, descriptor.altParentDir));
   if (!parentDirExists) {
     return makeDetail(descriptor, "not-installed", {
       level: "info",

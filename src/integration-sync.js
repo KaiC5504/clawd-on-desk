@@ -165,8 +165,8 @@ function createIntegrationSyncRuntime(options = {}) {
   function syncKimiHooks() {
     try {
       if (typeof ctx.syncKimiHooksImpl === "function") return ctx.syncKimiHooksImpl();
-      const { registerKimiHooks } = require("../hooks/kimi-install.js");
-      const result = registerKimiHooks({ silent: true });
+      const { registerKimiHooksAllTargets } = require("../hooks/kimi-install.js");
+      const result = registerKimiHooksAllTargets({ silent: true });
       if (hasPositiveCount(result.added) || hasPositiveCount(result.updated)) {
         console.log(`Clawd: synced Kimi hooks (added ${result.added}, updated ${result.updated})`);
       }
