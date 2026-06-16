@@ -88,6 +88,8 @@ const initPermission = require("./permission");
 const { registerPermissionIpc } = initPermission;
 const { createTelegramApprovalSidecar } = require("./telegram-approval-sidecar");
 const telegramApprovalSettings = require("./telegram-approval-settings");
+const discordPresenceSettings = require("./discord-presence-settings");
+const { createDiscordPresenceBridge } = require("./discord-presence-rpc");
 const {
   buildTelegramApprovalStatus,
   isNativeTelegramApprovalSelected,
@@ -299,6 +301,7 @@ let _telegramMigrationController = null;
 let telegramNativeRunner = null;
 let telegramCompanion = null;
 let telegramDirectSend = null;
+let discordPresenceBridge = null;
 let suppressTelegramApprovalSidecarSync = 0;
 let hardwareBuddyAdapter = null;
 let hardwareBuddyStatus = null;
@@ -1360,6 +1363,9 @@ const _stateCtx = {
     if (telegramCompanion) {
       try { telegramCompanion.onSnapshot(snapshot); } catch {}
     }
+    if (discordPresenceBridge) {
+      try { discordPresenceBridge.onSnapshot(snapshot); } catch {}
+    }
     if (_lanWss) { try { _lanWss.onSnapshot(); } catch {} }
   },
   // Phase 3b: 读 prefs.themeOverrides 判断某个 oneshot state 是否被用户禁用。
@@ -2279,6 +2285,35 @@ function queueTelegramApprovalSidecarSync(reason) {
   return telegramApprovalSyncPromise;
 }
 
+// In-process IPC bridge fed by the session-snapshot subscription.
+function startDiscordPresence() {
+  const config = _settingsController.getSnapshot().discordPresence;
+  const ready = discordPresenceSettings.readiness(config);
+  if (!ready.ready) return false;
+  if (!discordPresenceBridge) {
+    discordPresenceBridge = createDiscordPresenceBridge({
+      getConfig: () => _settingsController.getSnapshot().discordPresence,
+      log: (_level, msg) => { try { sessionLog(`[discord-presence] ${msg}`); } catch {} },
+    });
+  }
+  discordPresenceBridge.start();
+  // Force a replay; the broadcast is otherwise change-gated.
+  try { _state.emitSessionSnapshot({ force: true }); } catch {}
+  return true;
+}
+
+function syncDiscordPresence(reason = "settings") {
+  const config = _settingsController.getSnapshot().discordPresence;
+  const ready = discordPresenceSettings.readiness(config);
+  if (!ready.ready) {
+    if (discordPresenceBridge) discordPresenceBridge.stop();
+    try { sessionLog(`[discord-presence] sync ${reason}: off (${ready.reason})`); } catch {}
+    return false;
+  }
+  try { sessionLog(`[discord-presence] sync ${reason}: on`); } catch {}
+  return startDiscordPresence();
+}
+
 function telegramApprovalUnavailableMessage(status) {
   if (status && status.message) return status.message;
   if (status && status.reason === "disabled") return "Telegram approval is disabled";
@@ -2901,6 +2936,9 @@ _settingsController.subscribeKey("tgApproval", () => {
   if (suppressTelegramApprovalSidecarSync > 0) return;
   queueTelegramApprovalSidecarSync("settings");
 });
+_settingsController.subscribeKey("discordPresence", () => {
+  syncDiscordPresence("settings");
+});
 _settingsController.subscribeKey("mobilePreviewEnabled", async (enabled) => {
   if (enabled) {
     if (!_lanWss) {
@@ -3512,6 +3550,7 @@ if (!gotTheLock) {
     initTelegramMigrationController().catch((err) => {
       console.warn("Clawd: migration controller init failed:", err && err.message);
     });
+    syncDiscordPresence("startup");
     createWindow();
     // macOS: bridge the OS app-hidden state (⌘H / Dock right-click → 隐藏) to the
     // pet. Pet windows are setCanHide:NO, so the OS marks the app hidden but the

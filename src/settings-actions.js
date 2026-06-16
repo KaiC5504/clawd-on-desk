@@ -126,6 +126,7 @@ const {
   validateTelegramApproval,
   validateTelegramBotToken,
 } = require("./telegram-approval-settings");
+const { validateDiscordPresence } = require("./discord-presence-settings");
 const { EVENTS: TELEGRAM_MIGRATION_EVENTS } = require("./telegram-migration-state");
 const {
   validateHardwareBuddySettings,
@@ -437,6 +438,9 @@ const updateRegistry = {
   },
   tgApproval(value) {
     return validateTelegramApproval(value);
+  },
+  discordPresence(value) {
+    return validateDiscordPresence(value);
   },
 
   // v0.9.0 spike: persisted migration state across restarts. Shape:

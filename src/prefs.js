@@ -27,6 +27,10 @@ const {
   normalizeTelegramApproval,
 } = require("./telegram-approval-settings");
 const {
+  cloneDefaultDiscordPresence,
+  normalizeDiscordPresence,
+} = require("./discord-presence-settings");
+const {
   DEFAULT_HARDWARE_BUDDY_SETTINGS,
   normalizeHardwareBuddySettings,
 } = require("./hardware-buddy-settings");
@@ -288,6 +292,11 @@ const SCHEMA = {
     type: "object",
     defaultFactory: () => cloneDefaultTelegramApproval(),
     normalize: normalizeTelegramApproval,
+  },
+  discordPresence: {
+    type: "object",
+    defaultFactory: () => cloneDefaultDiscordPresence(),
+    normalize: normalizeDiscordPresence,
   },
   // v0.9.0 migration state. transport defaults to null (undecided) so v0.8.x
   // users upgrading without this key fall onto the "detect legacy artefacts"
