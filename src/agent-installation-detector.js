@@ -143,6 +143,18 @@ function resolveAgentPaths(descriptor, options) {
     };
   }
 
+  if (descriptor.agentId === "kimi-cli") {
+    const kimi = require("../hooks/kimi-install");
+    const legacyParent = rebaseHomePath(descriptor.parentDir, homeDir);
+    const altParent = rebaseHomePath(kimi.resolveKimiCodeParentDir(env), homeDir);
+    return {
+      parentDir: legacyParent,
+      configPath: rebaseHomePath(descriptor.configPath, homeDir),
+      altParentDir: altParent,
+      altConfigPath: path.join(altParent, "config.toml"),
+    };
+  }
+
   const parentDir = rebaseHomePath(descriptor.parentDir, homeDir);
   const configPath = rebaseHomePath(descriptor.configPath, homeDir);
   const paths = { parentDir, configPath };
@@ -268,12 +280,15 @@ function detectInstallation(descriptor, paths, options) {
     case "copilot-cli":
     case "cursor-agent":
     case "codebuddy":
-    case "kimi-cli":
     case "qwen-code":
     case "codewhale":
     case "opencode":
     case "qoder":
       if (dirExists(fsImpl, paths.parentDir)) return installationResult(true, "high", "parent-dir", `${paths.parentDir} exists`);
+      return notFound();
+    case "kimi-cli":
+      if (dirExists(fsImpl, paths.parentDir)) return installationResult(true, "high", "parent-dir", `${paths.parentDir} exists`);
+      if (dirExists(fsImpl, paths.altParentDir)) return installationResult(true, "high", "parent-dir", `${paths.altParentDir} exists`);
       return notFound();
     case "kiro-cli":
       if (dirExists(fsImpl, paths.parentDir)) return installationResult(true, "high", "parent-dir", `${paths.parentDir} exists`);
@@ -328,6 +343,16 @@ function detectClawdIntegration(descriptor, paths, options) {
       ? { detected: true, reason: "marker-found", detail: `${paths.configPath} contains ${descriptor.marker}`, paths: { configPath: paths.configPath } }
       : { detected: false, reason: "not-found", detail: `No ${descriptor.marker} marker found` };
   }
+  if (descriptor.agentId === "kimi-cli") {
+    for (const candidate of [paths.configPath, paths.altConfigPath]) {
+      const text = readText(fsImpl, candidate);
+      if (hasClawdMarkerText(text, descriptor.marker)) {
+        return { detected: true, reason: "marker-found", detail: `${candidate} contains ${descriptor.marker}`, paths: { configPath: candidate } };
+      }
+    }
+    return { detected: false, reason: "not-found", detail: `No ${descriptor.marker} marker found in Kimi config(s)` };
+  }
+
   const text = readText(fsImpl, paths.configPath);
   if (hasClawdMarkerText(text, descriptor.marker)) {
     return {

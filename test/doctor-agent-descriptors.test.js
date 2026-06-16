@@ -129,6 +129,14 @@ describe("doctor agent descriptors", () => {
     assert.strictEqual(getAgentDescriptor("missing"), null);
   });
 
+  it("kimi descriptor exposes the kimi-code alt paths", () => {
+    const { getAgentDescriptor } = require("../src/doctor-detectors/agent-descriptors");
+    const kimiInstall = require("../hooks/kimi-install");
+    const d = getAgentDescriptor("kimi-cli");
+    assert.strictEqual(d.altParentDir, kimiInstall.DEFAULT_KIMI_CODE_PARENT_DIR);
+    assert.strictEqual(d.altConfigPath, kimiInstall.DEFAULT_KIMI_CODE_CONFIG_PATH);
+  });
+
   it("checks Gemini hooks with the official nested settings shape", () => {
     const descriptor = getAgentDescriptor("gemini-cli");
 

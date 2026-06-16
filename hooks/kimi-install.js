@@ -16,6 +16,16 @@ const MODE_EXPLICIT = "explicit";
 const MODE_SUSPECT = "suspect";
 const DEFAULT_PARENT_DIR = path.join(os.homedir(), ".kimi");
 const DEFAULT_CONFIG_PATH = path.join(DEFAULT_PARENT_DIR, "config.toml");
+const DEFAULT_KIMI_CODE_PARENT_DIR = path.join(os.homedir(), ".kimi-code");
+const DEFAULT_KIMI_CODE_CONFIG_PATH = path.join(DEFAULT_KIMI_CODE_PARENT_DIR, "config.toml");
+
+// The new TypeScript Kimi Code CLI reads ~/.kimi-code/config.toml (or
+// $KIMI_CODE_HOME/config.toml). Mirror the COPILOT_HOME pattern: a trimmed,
+// non-empty env value wins, else fall back to the home-relative default.
+function resolveKimiCodeParentDir(env = process.env) {
+  const raw = env && typeof env.KIMI_CODE_HOME === "string" ? env.KIMI_CODE_HOME.trim() : "";
+  return raw ? path.resolve(raw) : DEFAULT_KIMI_CODE_PARENT_DIR;
+}
 
 const KIMI_HOOK_EVENTS = [
   "SessionStart",
@@ -268,11 +278,56 @@ function unregisterKimiHooks(options = {}) {
   return result;
 }
 
+// Legacy ~/.kimi + new ~/.kimi-code (or $KIMI_CODE_HOME); each is skipped at
+// register time if its parent dir is absent.
+function resolveKimiConfigTargets(options = {}) {
+  const env = options.env || process.env;
+  const home = (env.HOME || env.USERPROFILE || os.homedir());
+  // Re-derive from the caller's home, not resolveKimiCodeParentDir — its
+  // os.homedir() fallback would escape a test/cleanup sandbox home.
+  const kimiCodeRaw = typeof env.KIMI_CODE_HOME === "string" ? env.KIMI_CODE_HOME.trim() : "";
+  const kimiCodeParent = kimiCodeRaw ? path.resolve(kimiCodeRaw) : path.join(home, ".kimi-code");
+  return [
+    path.join(home, ".kimi", "config.toml"),
+    path.join(kimiCodeParent, "config.toml"),
+  ];
+}
+
+function registerKimiHooksAllTargets(options = {}) {
+  const totals = { added: 0, skipped: 0, updated: 0 };
+  for (const settingsPath of resolveKimiConfigTargets(options)) {
+    const r = registerKimiHooks({ ...options, settingsPath });
+    totals.added += r.added;
+    totals.skipped += r.skipped;
+    totals.updated += r.updated;
+  }
+  return totals;
+}
+
+function unregisterKimiHooksAllTargets(options = {}) {
+  let removed = 0;
+  let changed = false;
+  const backupPaths = [];
+  for (const settingsPath of resolveKimiConfigTargets(options)) {
+    const r = unregisterKimiHooks({ ...options, settingsPath });
+    removed += r.removed;
+    changed = changed || r.changed;
+    if (r.backupPath) backupPaths.push(r.backupPath);
+  }
+  return { removed, changed, backupPaths };
+}
+
 module.exports = {
   DEFAULT_PARENT_DIR,
   DEFAULT_CONFIG_PATH,
+  DEFAULT_KIMI_CODE_PARENT_DIR,
+  DEFAULT_KIMI_CODE_CONFIG_PATH,
+  resolveKimiCodeParentDir,
+  resolveKimiConfigTargets,
   registerKimiHooks,
   unregisterKimiHooks,
+  registerKimiHooksAllTargets,
+  unregisterKimiHooksAllTargets,
   KIMI_HOOK_EVENTS,
   normalizePermissionMode,
   extractExistingPermissionMode,
@@ -284,8 +339,8 @@ module.exports = {
 
 if (require.main === module) {
   try {
-    if (process.argv.includes("--uninstall")) unregisterKimiHooks({});
-    else registerKimiHooks({});
+    if (process.argv.includes("--uninstall")) unregisterKimiHooksAllTargets({});
+    else registerKimiHooksAllTargets({});
   } catch (err) {
     console.error(err.message);
     process.exit(1);

@@ -7,6 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const {
+  detectAgentInstallation,
   detectAgentInstallations,
 } = require("../src/agent-installation-detector");
 const { getAgentDescriptor } = require("../src/doctor-detectors/agent-descriptors");
@@ -197,5 +198,35 @@ describe("agent installation detector", () => {
     const report = detectAgentInstallations({ homeDir, fs: fsReadOnly, now: 1 });
 
     assert.strictEqual(byId(report, "opencode").detectedInstalled, true);
+  });
+});
+
+describe("Kimi installation detection (dual path)", () => {
+  it("detects installed when only ~/.kimi-code exists", () => {
+    const home = makeHome();
+    mkdirp(path.join(home, ".kimi-code"));
+    const res = detectAgentInstallation(getAgentDescriptor("kimi-cli"), { fs, homeDir: home, env: { HOME: home } });
+    assert.strictEqual(res.detectedInstalled, true);
+  });
+
+  it("detects installed when only legacy ~/.kimi exists", () => {
+    const home = makeHome();
+    mkdirp(path.join(home, ".kimi"));
+    const res = detectAgentInstallation(getAgentDescriptor("kimi-cli"), { fs, homeDir: home, env: { HOME: home } });
+    assert.strictEqual(res.detectedInstalled, true);
+  });
+
+  it("reports not installed when neither dir exists", () => {
+    const home = makeHome();
+    const res = detectAgentInstallation(getAgentDescriptor("kimi-cli"), { fs, homeDir: home, env: { HOME: home } });
+    assert.strictEqual(res.detectedInstalled, false);
+  });
+
+  it("finds the Clawd marker in ~/.kimi-code/config.toml", () => {
+    const home = makeHome();
+    mkdirp(path.join(home, ".kimi-code"));
+    writeText(path.join(home, ".kimi-code", "config.toml"), "[[hooks]]\ncommand = '\"node\" \"/x/kimi-hook.js\"'\n");
+    const res = detectAgentInstallation(getAgentDescriptor("kimi-cli"), { fs, homeDir: home, env: { HOME: home } });
+    assert.strictEqual(res.clawdIntegration.detected, true);
   });
 });
