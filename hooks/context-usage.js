@@ -3,6 +3,11 @@
 const DEFAULT_CLAUDE_CONTEXT_LIMIT = 200000;
 const CLAUDE_1M_CONTEXT_LIMIT = 1000000;
 const CLAUDE_1M_CONTEXT_MARKER_RE = /(?:^|[^a-z0-9])1m(?:[^a-z0-9]|$)/i;
+// Allowlist the model families Claude Code actually runs at 1M — keyed to Claude Code's
+// behavior, not the Anthropic API's capability: sonnet-4-6 is 1M on the API but Claude Code
+// runs it at 200k, so it's excluded. Claude Code strips the [1m] picker suffix before the
+// request, so match the plain resolved id. Add new minors here when CC promotes them to 1M.
+const CLAUDE_1M_MODELS_RE = /(?:opus-4-[678]|fable-5|mythos-5)(?![0-9])/i;
 
 function normalizeUsageNumber(value) {
   const n = Number(value);
@@ -12,7 +17,12 @@ function normalizeUsageNumber(value) {
 function resolveClaudeContextLimit(model) {
   const raw = typeof model === "string" ? model.toLowerCase() : "";
   if (!raw) return DEFAULT_CLAUDE_CONTEXT_LIMIT;
-  if (CLAUDE_1M_CONTEXT_MARKER_RE.test(raw)) return CLAUDE_1M_CONTEXT_LIMIT;
+  // CC disables its 1M window when this is set; the hook inherits CC's env, so mirror it.
+  const oneMillionDisabled = process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT === "1";
+  if (!oneMillionDisabled) {
+    if (CLAUDE_1M_CONTEXT_MARKER_RE.test(raw)) return CLAUDE_1M_CONTEXT_LIMIT; // explicit [1m] picker alias
+    if (CLAUDE_1M_MODELS_RE.test(raw)) return CLAUDE_1M_CONTEXT_LIMIT;
+  }
   if (raw.includes("opus") || raw.includes("sonnet") || raw.includes("haiku")) {
     return DEFAULT_CLAUDE_CONTEXT_LIMIT;
   }

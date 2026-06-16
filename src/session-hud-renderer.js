@@ -43,7 +43,7 @@ function formatTokenCount(value) {
   if (!Number.isFinite(n) || n < 0) return "";
   if (n >= 1000000) {
     const formatted = (n / 1000000).toFixed(n >= 10000000 ? 0 : 1);
-    return `${formatted.replace(/\.0$/, "")}m`;
+    return `${formatted.replace(/\.0$/, "")}M`;
   }
   if (n >= 1000) {
     const formatted = (n / 1000).toFixed(n >= 10000 ? 0 : 1);
