@@ -57,12 +57,14 @@ describe("Claude context usage parser", () => {
     });
   });
 
-  it("uses a 1M limit for Claude models marked with 1m context", () => {
+  it("uses a 1M limit for a real plain claude-opus-4-8 transcript entry", () => {
+    // Real Claude Code transcripts record the plain resolved id (no [1m] suffix);
+    // Claude Code strips the alias before the request. This is the case that shipped broken.
     const usage = extractClaudeContextUsageFromEntries([
       {
         type: "assistant",
         message: {
-          model: "claude-opus-4-8[1m]",
+          model: "claude-opus-4-8",
           usage: {
             input_tokens: 250000,
             cache_read_input_tokens: 0,
@@ -78,6 +80,41 @@ describe("Claude context usage parser", () => {
       percent: 25,
       source: "claude",
     });
+  });
+
+  it("reports the originally-reported 43k symptom as ~4% of 1M, not 22% of 200k", () => {
+    const usage = extractClaudeContextUsageFromEntries([
+      {
+        type: "assistant",
+        message: {
+          model: "claude-opus-4-8",
+          usage: { input_tokens: 43000 },
+        },
+      },
+    ]);
+
+    assert.deepStrictEqual(usage, {
+      used: 43000,
+      limit: 1000000,
+      percent: 4,
+      source: "claude",
+    });
+  });
+
+  it("still honors an explicit [1m] alias marker (belt-and-suspenders branch)", () => {
+    assert.strictEqual(resolveClaudeContextLimit("claude-opus-4-8[1m]"), 1000000);
+  });
+
+  it("maps every verified 1M model family to a 1M limit", () => {
+    for (const model of [
+      "claude-opus-4-6",
+      "claude-opus-4-7",
+      "claude-opus-4-8",
+      "claude-fable-5",
+      "claude-mythos-5",
+    ]) {
+      assert.strictEqual(resolveClaudeContextLimit(model), 1000000, model);
+    }
   });
 
   it("uses the latest usage entry from a transcript tail", () => {
@@ -240,5 +277,43 @@ describe("Claude context usage parser", () => {
     ]);
 
     assert.deepStrictEqual(usage, { used: 123, source: "claude" });
+  });
+
+  it("keeps genuine-200k Claude models at the 200k default", () => {
+    for (const model of [
+      "claude-opus-4-5",            // opus, but genuinely 200k — the tricky exclusion
+      "claude-opus-4-1",
+      "claude-sonnet-4-5",
+      "claude-sonnet-4-6",          // 1M-capable on the API, but Claude Code runs it at 200k
+      "claude-haiku-4-5-20251001",
+    ]) {
+      assert.strictEqual(resolveClaudeContextLimit(model), 200000, model);
+    }
+  });
+
+  it("does not promote a hypothetical two-digit minor version to 1M", () => {
+    // The (?![0-9]) anchor: opus-4-80 must not match the opus-4-8 allowlist entry
+    // (it falls through to the opus 200k default)...
+    assert.strictEqual(resolveClaudeContextLimit("claude-opus-4-80"), 200000);
+    // ...while a real date-suffixed 1M id (next char is '-', not a digit) stays 1M.
+    assert.strictEqual(resolveClaudeContextLimit("claude-opus-4-8-20260101"), 1000000);
+  });
+
+  it("returns null (no limit shown) for non-Claude / unknown model ids", () => {
+    assert.strictEqual(resolveClaudeContextLimit("claude-2.0"), null); // pre-3.x 100k, no family token
+    assert.strictEqual(resolveClaudeContextLimit("gpt-5"), null);
+    assert.strictEqual(resolveClaudeContextLimit(""), 200000);         // empty -> existing default
+  });
+
+  it("forces 200k when CLAUDE_CODE_DISABLE_1M_CONTEXT=1 is set", () => {
+    const prev = process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT;
+    process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = "1";
+    try {
+      assert.strictEqual(resolveClaudeContextLimit("claude-opus-4-8"), 200000);
+      assert.strictEqual(resolveClaudeContextLimit("claude-opus-4-8[1m]"), 200000);
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT;
+      else process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = prev;
+    }
   });
 });
