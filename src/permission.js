@@ -1006,6 +1006,25 @@ function getTelegramApprovalClient() {
   return ctx.telegramApprovalClient || null;
 }
 
+// Enabled remote-approval adapters in priority order. Generalized from the old
+// single-Telegram lookup so Discord (and any future channel) plug in without
+// touching the approval logic below. Two-level dispatch mirrors
+// getTelegramApprovalClient: prefer ctx.getRemoteApprovalClients(), otherwise
+// fall back to the single known Telegram client.
+function getRemoteApprovalClients() {
+  if (typeof ctx.getRemoteApprovalClients === "function") {
+    try {
+      const list = ctx.getRemoteApprovalClients();
+      return Array.isArray(list) ? list.filter(Boolean) : [];
+    } catch (err) {
+      permLog(`remote approval registry lookup failed: ${compactRemoteApprovalText(err && err.message ? err.message : err, 200)}`);
+      return [];
+    }
+  }
+  const single = getTelegramApprovalClient();
+  return single ? [single] : [];
+}
+
 function cancelRemoteApproval(permEntry) {
   const controller = permEntry && permEntry.remoteApprovalAbortController;
   if (!controller) return;
@@ -1047,9 +1066,11 @@ function maybeStartRemoteApproval(permEntry) {
   // entry is already gone from the pending list it was resolved (auto-approved
   // or otherwise) — don't fire a Telegram card for a closed request.
   if (pendingPermissions.indexOf(permEntry) === -1) return false;
-  const client = getTelegramApprovalClient();
-  if (!client || typeof client.requestApproval !== "function") return false;
-  if (typeof client.isEnabled === "function" && !client.isEnabled()) return false;
+  const client = getRemoteApprovalClients().find(
+    (c) => c && typeof c.requestApproval === "function" &&
+      (typeof c.isEnabled !== "function" || c.isEnabled())
+  );
+  if (!client) return false;
 
   const payload = buildRemoteApprovalPayload(permEntry);
   if (!payload) return false;
