@@ -127,6 +127,7 @@ const {
   validateTelegramBotToken,
 } = require("./telegram-approval-settings");
 const { validateDiscordPresence } = require("./discord-presence-settings");
+const { validateDiscordApproval, validateDiscordBotToken } = require("./discord-approval-settings");
 const { EVENTS: TELEGRAM_MIGRATION_EVENTS } = require("./telegram-migration-state");
 const {
   validateHardwareBuddySettings,
@@ -441,6 +442,9 @@ const updateRegistry = {
   },
   discordPresence(value) {
     return validateDiscordPresence(value);
+  },
+  discordApproval(value) {
+    return validateDiscordApproval(value);
   },
 
   // v0.9.0 spike: persisted migration state across restarts. Shape:
@@ -1136,6 +1140,45 @@ async function telegramApprovalSendTest(_payload, deps = {}) {
   return result || { status: "error", message: "Telegram approval test returned no result" };
 }
 
+async function discordApprovalSetToken(payload, deps = {}) {
+  const token = typeof payload === "string"
+    ? payload
+    : (payload && typeof payload === "object" ? payload.token : "");
+  const valid = validateDiscordBotToken(token);
+  if (valid.status !== "ok") return valid;
+  if (!deps || typeof deps.writeDiscordApprovalToken !== "function") {
+    return { status: "error", message: "discordApproval.setToken requires writeDiscordApprovalToken dep" };
+  }
+  const result = await deps.writeDiscordApprovalToken(valid.token);
+  if (!result || result.status !== "ok") {
+    return result || { status: "error", message: "Discord bot token write failed" };
+  }
+  return { status: "ok", tokenStored: true };
+}
+
+function discordApprovalTokenInfo(_payload, deps = {}) {
+  if (!deps || typeof deps.getDiscordApprovalTokenInfo !== "function") {
+    return { status: "error", message: "discordApproval.tokenInfo requires getDiscordApprovalTokenInfo dep" };
+  }
+  const info = deps.getDiscordApprovalTokenInfo() || { configured: false, masked: "" };
+  return {
+    status: "ok",
+    configured: info.configured === true,
+    masked: typeof info.masked === "string" ? info.masked : "",
+  };
+}
+
+async function discordApprovalSendTest(_payload, deps = {}) {
+  if (!deps || typeof deps.sendDiscordApprovalTest !== "function") {
+    return { status: "error", message: "discordApproval.test requires sendDiscordApprovalTest dep" };
+  }
+  const result = await deps.sendDiscordApprovalTest();
+  return result || { status: "error", message: "Discord approval test returned no result" };
+}
+
+discordApprovalSetToken.lockKey = "discordApproval";
+discordApprovalSendTest.lockKey = "discordApproval";
+
 function cleanupMessage(result) {
   const summary = result && result.summary;
   if (!summary) return "Integration cleanup finished";
@@ -1328,6 +1371,9 @@ const commandRegistry = {
   "telegramApproval.status": telegramApprovalStatus,
   "telegramApproval.tokenInfo": telegramApprovalTokenInfo,
   "telegramApproval.test": telegramApprovalSendTest,
+  "discordApproval.setToken": discordApprovalSetToken,
+  "discordApproval.tokenInfo": discordApprovalTokenInfo,
+  "discordApproval.test": discordApprovalSendTest,
   "telegramMigration.snapshot": telegramMigrationSnapshot,
   "telegramMigration.dispatch": telegramMigrationDispatch,
 };
