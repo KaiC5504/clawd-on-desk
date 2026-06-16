@@ -885,8 +885,13 @@ function isRemoteRichApprovalSupported(permEntry) {
 
 function isRemoteApprovalActionable(permEntry) {
   if (!permEntry || typeof permEntry !== "object") return false;
-  if (permEntry.isElicitation || permEntry.isCodexNotify || permEntry.isKimiNotify || permEntry.isOpencode || permEntry.isAntigravity || permEntry.isCopilotCli) return false;
-  if (permEntry.toolName === "ExitPlanMode" || permEntry.toolName === "AskUserQuestion") return false;
+  if (permEntry.isCodexNotify || permEntry.isKimiNotify || permEntry.isOpencode || permEntry.isAntigravity || permEntry.isCopilotCli) return false;
+  // Plan approval (ExitPlanMode) and question options (AskUserQuestion /
+  // elicitation) are actionable remotely only for rich agents, and only reach
+  // an adapter that declares it canHandle the "plan"/"question" kind — Discord
+  // does, Telegram does not — so Telegram-only and local behaviour are unchanged.
+  if ((permEntry.toolName === "ExitPlanMode" || permEntry.toolName === "AskUserQuestion" || permEntry.isElicitation)
+      && !isRemoteRichApprovalSupported(permEntry)) return false;
   if (PASSTHROUGH_TOOLS.has(permEntry.toolName)) return false;
   // Headless sessions auto-deny locally; mirror that on the Telegram side so a
   // non-interactive Codex/CC run never sends an actionable approval card.
@@ -906,10 +911,17 @@ function buildRemoteApprovalSummary(permEntry) {
   const input = permEntry && permEntry.toolInput && typeof permEntry.toolInput === "object"
     ? permEntry.toolInput
     : {};
+  // Elicitation: summarize the first question so the card isn't a black box.
+  if (permEntry && permEntry.isElicitation && Array.isArray(input.questions) && input.questions.length) {
+    const first = input.questions.find((q) => q && typeof q.question === "string" && q.question.trim());
+    const text = compactRemoteApprovalText(first ? first.question : "", 200);
+    if (text) return input.questions.length > 1 ? `${text} (+${input.questions.length - 1} more)` : text;
+  }
   const candidates = [
     input.description,
     input.summary,
     input.reason,
+    input.plan, // ExitPlanMode carries the plan markdown here
   ];
   for (const candidate of candidates) {
     const text = compactRemoteApprovalText(candidate, 200);
@@ -952,6 +964,22 @@ function buildRemoteSuggestionButtons(permEntry) {
   return buttons;
 }
 
+// Normalize elicitation questions into a redacted, index-addressable shape for
+// remote rendering. Option `value` is the original option INDEX (as a string)
+// so the answer maps back to the original label/question by index on resolve —
+// never by the (compacted, display-only) text. Capped to Discord's limits.
+function buildRemoteQuestionPayload(questions) {
+  return (Array.isArray(questions) ? questions : []).slice(0, 5).map((q) => ({
+    question: compactRemoteApprovalText(q && q.question, 240),
+    multiSelect: !!(q && q.multiSelect),
+    options: (Array.isArray(q && q.options) ? q.options : []).slice(0, 25).map((o, i) => ({
+      value: String(i),
+      label: compactRemoteApprovalText(o && o.label, 80),
+      description: compactRemoteApprovalText(o && o.description, 100),
+    })).filter((o) => o.label),
+  })).filter((q) => q.question && q.options.length);
+}
+
 // Returns the Telegram approval payload, or null when there is no safe summary
 // to ship. Callers must treat null as a no-op signal — never send a card
 // without an action-describing summary.
@@ -981,6 +1009,20 @@ function buildRemoteApprovalPayload(permEntry) {
     detail,
   };
   if (suggestionButtons.length > 0) payload.suggestions = suggestionButtons;
+  // Richer kinds reach only adapters that canHandle them (Discord). Gated to
+  // rich agents; everything else stays a plain "approval" allow/deny card.
+  if (isRemoteRichApprovalSupported(permEntry)) {
+    if (permEntry.toolName === "ExitPlanMode") {
+      payload.kind = "plan";
+    } else if (permEntry.isElicitation || permEntry.toolName === "AskUserQuestion") {
+      const questions = buildRemoteQuestionPayload(
+        permEntry.toolInput && permEntry.toolInput.questions
+      );
+      if (!questions.length) return null; // can't render it as a question -> stay local, never a plain allow/deny card
+      payload.kind = "question";
+      payload.questions = questions;
+    }
+  }
   return payload;
 }
 
@@ -989,11 +1031,54 @@ function normalizeRemoteApprovalDecision(decision) {
   if (!decision || typeof decision !== "object") return null;
   const action = decision.action === "allow" || decision.decision === "allow" ? "allow"
     : (decision.action === "deny" || decision.decision === "deny" ? "deny"
-      : (decision.action === "suggestion" ? "suggestion" : null));
+      : (decision.action === "suggestion" ? "suggestion"
+        : (decision.action === "answer" ? "answer" : null)));
   if (!action) return null;
-  if (action !== "suggestion") return { action };
-  const index = Number(decision.index);
-  return Number.isInteger(index) && index >= 0 ? { action, index } : null;
+  if (action === "suggestion") {
+    const index = Number(decision.index);
+    return Number.isInteger(index) && index >= 0 ? { action, index } : null;
+  }
+  if (action === "answer") {
+    // answers: { [questionIndex]: { selected: number[], other?: string } }
+    return decision.answers && typeof decision.answers === "object"
+      ? { action, answers: decision.answers }
+      : null;
+  }
+  // allow / deny — carry an optional deny message (ExitPlanMode "keep planning"
+  // feedback the agent feeds back to the model).
+  const out = { action };
+  if (action === "deny" && typeof decision.message === "string" && decision.message.trim()) {
+    out.message = decision.message.trim();
+  }
+  return out;
+}
+
+// Turn a remote elicitation answer (option indices + optional free text, keyed
+// by question index) into permEntry.resolvedUpdatedInput, using the ORIGINAL
+// toolInput questions/labels so the answer matches exactly what the agent sent.
+// Returns false if nothing usable was selected (treated as a no-op).
+function applyRemoteAnswer(permEntry, answers) {
+  const questions = permEntry && permEntry.toolInput && Array.isArray(permEntry.toolInput.questions)
+    ? permEntry.toolInput.questions
+    : [];
+  if (!questions.length || !answers || typeof answers !== "object") return false;
+  const answersMap = {};
+  for (const [key, value] of Object.entries(answers)) {
+    const qIdx = Number(key);
+    const question = Number.isInteger(qIdx) ? questions[qIdx] : null;
+    if (!question || typeof question.question !== "string") continue;
+    const options = Array.isArray(question.options) ? question.options : [];
+    const selected = value && Array.isArray(value.selected) ? value.selected : [];
+    const labels = selected
+      .map((i) => (options[i] && typeof options[i].label === "string" ? options[i].label : null))
+      .filter(Boolean);
+    const other = value && typeof value.other === "string" ? value.other.trim() : "";
+    if (other) labels.push(other);
+    if (labels.length) answersMap[question.question] = labels.join(", ");
+  }
+  if (!Object.keys(answersMap).length) return false;
+  permEntry.resolvedUpdatedInput = buildElicitationUpdatedInput(permEntry.toolInput, answersMap);
+  return true;
 }
 
 function getTelegramApprovalClient() {
@@ -1066,14 +1151,20 @@ function maybeStartRemoteApproval(permEntry) {
   // entry is already gone from the pending list it was resolved (auto-approved
   // or otherwise) — don't fire a Telegram card for a closed request.
   if (pendingPermissions.indexOf(permEntry) === -1) return false;
-  const client = getRemoteApprovalClients().find(
-    (c) => c && typeof c.requestApproval === "function" &&
-      (typeof c.isEnabled !== "function" || c.isEnabled())
-  );
-  if (!client) return false;
 
   const payload = buildRemoteApprovalPayload(permEntry);
   if (!payload) return false;
+  // Build the payload first so the adapter can be picked by capability: only an
+  // adapter that canHandle this kind (Discord for plan/question) is eligible.
+  // Adapters opt into rich kinds via canHandle(); a client without it (Telegram)
+  // is eligible for plain "approval" only, so plan/question never reach it.
+  const kind = payload.kind || "approval";
+  const client = getRemoteApprovalClients().find(
+    (c) => c && typeof c.requestApproval === "function" &&
+      (typeof c.isEnabled !== "function" || c.isEnabled()) &&
+      (kind === "approval" || (typeof c.canHandle === "function" && c.canHandle(kind)))
+  );
+  if (!client) return false;
 
   const controller = typeof AbortController === "function" ? new AbortController() : null;
   if (controller) permEntry.remoteApprovalAbortController = controller;
@@ -1100,8 +1191,16 @@ function maybeStartRemoteApproval(permEntry) {
         return;
       }
       if (pendingPermissions.indexOf(permEntry) === -1) return;
+      if (normalized.action === "answer") {
+        if (!applyRemoteAnswer(permEntry, normalized.answers)) {
+          permLog(`remote approval ignored unusable answer`);
+          return;
+        }
+        resolvePermissionEntry(permEntry, "allow");
+        return;
+      }
       if (normalized.action === "allow" || normalized.action === "deny") {
-        resolvePermissionEntry(permEntry, normalized.action);
+        resolvePermissionEntry(permEntry, normalized.action, normalized.message);
         return;
       }
       if (!isRemoteRichApprovalSupported(permEntry)) {

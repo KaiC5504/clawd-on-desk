@@ -76,6 +76,30 @@ function clickInteraction(customId, userId = OWNER, extra = {}) {
   };
 }
 
+function selectInteraction(customId, values, userId = OWNER) {
+  return {
+    type: 3,
+    id: "select-1",
+    token: "select-token",
+    member: { user: { id: userId } },
+    data: { custom_id: customId, component_type: 3, values },
+  };
+}
+
+function modalSubmit(customId, text, userId = OWNER) {
+  return {
+    type: 5,
+    id: "modal-1",
+    token: "modal-token",
+    member: { user: { id: userId } },
+    data: { custom_id: customId, components: [{ type: 1, components: [{ type: 4, custom_id: "field", value: text }] }] },
+  };
+}
+
+function lastCallbackOfType(rest, type) {
+  return rest.calls.callbacks.filter((c) => c.payload && c.payload.type === type).slice(-1)[0];
+}
+
 function flush() {
   return new Promise((resolve) => setImmediate(resolve));
 }
@@ -391,5 +415,278 @@ describe("Discord adapter through the permission seam", () => {
     assert.equal(perm.pendingPermissions.length, 0);
     assert.equal(entry.res.captured.body, bodyAfterLocal);
     assert.deepEqual(JSON.parse(entry.res.captured.body).hookSpecificOutput.decision, { behavior: "deny" });
+  });
+});
+
+describe("remote elicitation + plan approval over the seam (Discord-only)", () => {
+  // A Telegram-shaped client: enabled, but no canHandle -> approval kind only.
+  function telegramLike() {
+    return { calls: [], isEnabled: () => true, requestApproval(p) { this.calls.push(p); return new Promise(() => {}); } };
+  }
+  // A Discord-shaped client: declares canHandle for the rich kinds.
+  function discordLike(onRequest) {
+    return {
+      calls: [],
+      isEnabled: () => true,
+      canHandle: (k) => k === "approval" || k === "question" || k === "plan",
+      requestApproval(p) { this.calls.push(p); return onRequest ? onRequest(p) : new Promise(() => {}); },
+    };
+  }
+  function questionEntry(over = {}) {
+    return makePermEntry({
+      agentId: "claude-code",
+      isElicitation: true,
+      toolName: "AskUserQuestion",
+      toolInput: { questions: [{ question: "Pick one", multiSelect: false, options: [{ label: "Alpha" }, { label: "Bravo" }] }] },
+      ...over,
+    });
+  }
+  function planEntry(over = {}) {
+    return makePermEntry({
+      agentId: "claude-code",
+      toolName: "ExitPlanMode",
+      toolInput: { plan: "Step 1. Do the thing.\nStep 2. Verify it." },
+      ...over,
+    });
+  }
+
+  it("routes a question only to an adapter that canHandle('question'), with indexed options", () => {
+    const tg = telegramLike();
+    const dc = discordLike();
+    const perm = initPermission(makeCtx({ getRemoteApprovalClients: () => [tg, dc] }));
+    const entry = questionEntry();
+    perm.pendingPermissions.push(entry);
+
+    assert.equal(perm.maybeStartRemoteApproval(entry), true);
+    assert.equal(tg.calls.length, 0, "telegram (no canHandle) must not receive a question");
+    assert.equal(dc.calls.length, 1);
+    assert.equal(dc.calls[0].kind, "question");
+    assert.equal(dc.calls[0].questions[0].options[1].label, "Bravo");
+    assert.equal(dc.calls[0].questions[0].options[1].value, "1");
+  });
+
+  it("maps an answer (indices) back to the original question text + labels and resolves allow", async () => {
+    let resolveApproval;
+    const dc = discordLike(() => new Promise((r) => { resolveApproval = r; }));
+    const perm = initPermission(makeCtx({ getRemoteApprovalClients: () => [dc] }));
+    const entry = questionEntry();
+    perm.pendingPermissions.push(entry);
+
+    assert.equal(perm.maybeStartRemoteApproval(entry), true);
+    resolveApproval({ action: "answer", answers: { 0: { selected: [1] } } });
+    await flush();
+    await flush();
+
+    assert.equal(perm.pendingPermissions.length, 0);
+    const decision = JSON.parse(entry.res.captured.body).hookSpecificOutput.decision;
+    assert.equal(decision.behavior, "allow");
+    assert.equal(decision.updatedInput.answers["Pick one"], "Bravo");
+  });
+
+  it("joins multi-select labels and free-text 'other' into the answer", async () => {
+    let resolveApproval;
+    const dc = discordLike(() => new Promise((r) => { resolveApproval = r; }));
+    const perm = initPermission(makeCtx({ getRemoteApprovalClients: () => [dc] }));
+    const entry = questionEntry({ toolInput: { questions: [{ question: "Q", multiSelect: true, options: [{ label: "A" }, { label: "B" }] }] } });
+    perm.pendingPermissions.push(entry);
+
+    perm.maybeStartRemoteApproval(entry);
+    resolveApproval({ action: "answer", answers: { 0: { selected: [0], other: "custom thing" } } });
+    await flush();
+    await flush();
+
+    const decision = JSON.parse(entry.res.captured.body).hookSpecificOutput.decision;
+    assert.equal(decision.updatedInput.answers["Q"], "A, custom thing");
+  });
+
+  it("sends a plan card for ExitPlanMode and approves on allow", async () => {
+    let resolveApproval;
+    const dc = discordLike(() => new Promise((r) => { resolveApproval = r; }));
+    const perm = initPermission(makeCtx({ getRemoteApprovalClients: () => [dc] }));
+    const entry = planEntry();
+    perm.pendingPermissions.push(entry);
+
+    assert.equal(perm.maybeStartRemoteApproval(entry), true);
+    assert.equal(dc.calls[0].kind, "plan");
+    assert.match(dc.calls[0].detail, /Step 1/);
+
+    resolveApproval("allow");
+    await flush();
+    await flush();
+    assert.equal(JSON.parse(entry.res.captured.body).hookSpecificOutput.decision.behavior, "allow");
+  });
+
+  it("carries 'keep planning' feedback as a deny message", async () => {
+    let resolveApproval;
+    const dc = discordLike(() => new Promise((r) => { resolveApproval = r; }));
+    const perm = initPermission(makeCtx({ getRemoteApprovalClients: () => [dc] }));
+    const entry = planEntry();
+    perm.pendingPermissions.push(entry);
+
+    perm.maybeStartRemoteApproval(entry);
+    resolveApproval({ action: "deny", message: "Use a different approach" });
+    await flush();
+    await flush();
+
+    const decision = JSON.parse(entry.res.captured.body).hookSpecificOutput.decision;
+    assert.equal(decision.behavior, "deny");
+    assert.equal(decision.message, "Use a different approach");
+  });
+
+  it("keeps plan/question LOCAL when only a Telegram-style adapter is present", () => {
+    const tg = telegramLike();
+    const perm = initPermission(makeCtx({ getRemoteApprovalClients: () => [tg] }));
+    const entry = questionEntry();
+    perm.pendingPermissions.push(entry);
+
+    assert.equal(perm.maybeStartRemoteApproval(entry), false);
+    assert.equal(tg.calls.length, 0);
+    assert.equal(perm.pendingPermissions.length, 1);
+  });
+
+  it("does not make plan/question actionable for non-rich agents", () => {
+    const dc = discordLike(() => Promise.resolve(null));
+    const perm = initPermission(makeCtx({ getRemoteApprovalClients: () => [dc] }));
+    const q = questionEntry({ agentId: "codex", isCodex: true });
+    const p = planEntry({ agentId: "codex", isCodex: true });
+    perm.pendingPermissions.push(q, p);
+
+    assert.equal(perm.maybeStartRemoteApproval(q), false);
+    assert.equal(perm.maybeStartRemoteApproval(p), false);
+    assert.equal(dc.calls.length, 0);
+  });
+});
+
+describe("DiscordApprovalClient — plan + question kinds", () => {
+  it("canHandle covers approval/plan/question only", () => {
+    const { client } = makeDiscordClient();
+    assert.equal(client.canHandle("approval"), true);
+    assert.equal(client.canHandle("plan"), true);
+    assert.equal(client.canHandle("question"), true);
+    assert.equal(client.canHandle("nope"), false);
+  });
+
+  it("plan kind posts Approve / Keep planning / Request changes; Approve resolves allow", async () => {
+    const { client, rest, gateway } = makeDiscordClient();
+    const decision = client.requestApproval({ kind: "plan", title: "Plan", detail: "Step 1. Do X." }, {});
+    await flush();
+    await flush();
+    const ids = rest.calls.messages[0].body.components[0].components.map((b) => b.custom_id);
+    assert.match(ids[0], /^approve:/);
+    assert.match(ids[1], /^deny:/);
+    assert.match(ids[2], /^planmod:/);
+
+    gateway.emitInteraction(clickInteraction(ids[0]));
+    assert.equal(await decision, "allow");
+  });
+
+  it("plan 'Request changes' opens a modal and submitting resolves deny + feedback", async () => {
+    const { client, rest, gateway } = makeDiscordClient();
+    const decision = client.requestApproval({ kind: "plan", title: "Plan", detail: "Step 1." }, {});
+    await flush();
+    await flush();
+    const planmodId = rest.calls.messages[0].body.components[0].components[2].custom_id;
+
+    gateway.emitInteraction(clickInteraction(planmodId));
+    const modalCb = lastCallbackOfType(rest, 9);
+    assert.ok(modalCb, "a modal callback (type 9) was issued");
+
+    gateway.emitInteraction(modalSubmit(modalCb.payload.data.custom_id, "Use approach B instead"));
+    assert.deepEqual(await decision, { action: "deny", message: "Use approach B instead" });
+  });
+
+  it("single-select question resolves an answer keyed by question index", async () => {
+    const { client, rest, gateway } = makeDiscordClient();
+    const decision = client.requestApproval({
+      kind: "question", title: "Q", detail: "",
+      questions: [{ question: "Pick", multiSelect: false, options: [{ value: "0", label: "A" }, { value: "1", label: "B" }] }],
+    }, {});
+    await flush();
+    await flush();
+    const optBtns = rest.calls.messages[0].body.components[0].components;
+    assert.match(optBtns[1].custom_id, /^qopt:[^:]+:0:1$/);
+
+    gateway.emitInteraction(clickInteraction(optBtns[1].custom_id));
+    assert.deepEqual(await decision, { action: "answer", answers: { 0: { selected: [1] } } });
+  });
+
+  it("multi-select question uses a select menu + Confirm and resolves all picks", async () => {
+    const { client, rest, gateway } = makeDiscordClient();
+    const options = [0, 1, 2, 3, 4, 5].map((i) => ({ value: String(i), label: `O${i}` }));
+    const decision = client.requestApproval({
+      kind: "question", title: "Q", detail: "",
+      questions: [{ question: "Pick many", multiSelect: true, options }],
+    }, {});
+    await flush();
+    await flush();
+    const rows = rest.calls.messages[0].body.components;
+    assert.equal(rows[0].components[0].type, 3, "string select");
+    const selId = rows[0].components[0].custom_id;
+    const confirmId = rows[1].components[0].custom_id;
+    assert.match(confirmId, /^qok:/);
+
+    gateway.emitInteraction(selectInteraction(selId, ["0", "2"]));
+    gateway.emitInteraction(clickInteraction(confirmId));
+    assert.deepEqual(await decision, { action: "answer", answers: { 0: { selected: [0, 2] } } });
+  });
+
+  it("walks multiple questions sequentially then finishes with all answers", async () => {
+    const { client, rest, gateway } = makeDiscordClient();
+    const decision = client.requestApproval({
+      kind: "question", title: "Q", detail: "",
+      questions: [
+        { question: "Q1", multiSelect: false, options: [{ value: "0", label: "A" }, { value: "1", label: "B" }] },
+        { question: "Q2", multiSelect: false, options: [{ value: "0", label: "X" }, { value: "1", label: "Y" }] },
+      ],
+    }, {});
+    await flush();
+    await flush();
+    const q1 = rest.calls.messages[0].body.components[0].components[0].custom_id; // qopt:h:0:0
+    gateway.emitInteraction(clickInteraction(q1));
+
+    const adv = lastCallbackOfType(rest, 7);
+    assert.ok(adv, "advanced via UPDATE_MESSAGE");
+    const q2btn = adv.payload.data.components[0].components.find((b) => /^qopt:[^:]+:1:1$/.test(b.custom_id));
+    assert.ok(q2btn, "second question rendered");
+    gateway.emitInteraction(clickInteraction(q2btn.custom_id));
+
+    assert.deepEqual(await decision, { action: "answer", answers: { 0: { selected: [0] }, 1: { selected: [1] } } });
+  });
+
+  it("'Other' opens a modal and records free text as the answer", async () => {
+    const { client, rest, gateway } = makeDiscordClient();
+    const decision = client.requestApproval({
+      kind: "question", title: "Q", detail: "",
+      questions: [{ question: "Pick", multiSelect: false, options: [{ value: "0", label: "A" }] }],
+    }, {});
+    await flush();
+    await flush();
+    const rows = rest.calls.messages[0].body.components;
+    const otherId = rows[rows.length - 1].components[0].custom_id;
+    assert.match(otherId, /^qother:/);
+
+    gateway.emitInteraction(clickInteraction(otherId));
+    const modalCb = lastCallbackOfType(rest, 9);
+    assert.ok(modalCb, "Other opens a modal");
+    gateway.emitInteraction(modalSubmit(modalCb.payload.data.custom_id, "my own answer"));
+
+    assert.deepEqual(await decision, { action: "answer", answers: { 0: { selected: [], other: "my own answer" } } });
+  });
+
+  it("ignores a non-owner click on a question option", async () => {
+    const { client, rest, gateway } = makeDiscordClient();
+    const decision = client.requestApproval({
+      kind: "question", title: "Q", detail: "",
+      questions: [{ question: "Pick", multiSelect: false, options: [{ value: "0", label: "A" }] }],
+    }, {});
+    await flush();
+    await flush();
+    const optId = rest.calls.messages[0].body.components[0].components[0].custom_id;
+    let resolved = false;
+    decision.then(() => { resolved = true; });
+    gateway.emitInteraction(clickInteraction(optId, "999999999999999999"));
+    await flush();
+    await flush();
+    assert.equal(resolved, false);
   });
 });

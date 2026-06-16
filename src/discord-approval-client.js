@@ -22,36 +22,56 @@ const GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json";
 const ERR_CANNOT_DM = 50007;
 
 // Discord interaction callback types.
-const CALLBACK_DEFERRED_UPDATE = 6; // ACK a component interaction, edit later
-// Discord button styles.
+const CALLBACK_DEFERRED_UPDATE = 6; // ACK a component interaction, no visible change
+const CALLBACK_UPDATE_MESSAGE = 7;  // ACK + rewrite the source message in one go
+const CALLBACK_MODAL = 9;           // open a text-input modal
+// Discord component types + button/text-input styles.
+const COMP_ACTION_ROW = 1;
+const COMP_BUTTON = 2;
+const COMP_STRING_SELECT = 3;
+const COMP_TEXT_INPUT = 4;
+const BTN_PRIMARY = 1;
+const BTN_SECONDARY = 2;
 const BTN_SUCCESS = 3;
 const BTN_DANGER = 4;
-const BTN_SECONDARY = 2;
+const TEXT_INPUT_SHORT = 1;
+const TEXT_INPUT_PARAGRAPH = 2;
+
+function clip(value, max) {
+  return String(value == null ? "" : value).slice(0, max);
+}
 
 function parseCustomId(id) {
-  let m = /^(approve|deny):(.+)$/.exec(id);
-  if (m) return { action: m[1] === "approve" ? "allow" : "deny", handle: m[2] };
-  m = /^sug:([^:]+):(\d+)$/.exec(id);
-  if (m) return { action: "suggestion", handle: m[1], index: Number(m[2]) };
+  let m;
+  if ((m = /^approve:(.+)$/.exec(id))) return { type: "approve", handle: m[1] };
+  if ((m = /^deny:(.+)$/.exec(id))) return { type: "deny", handle: m[1] };
+  if ((m = /^sug:([^:]+):(\d+)$/.exec(id))) return { type: "suggestion", handle: m[1], index: Number(m[2]) };
+  if ((m = /^planmod:(.+)$/.exec(id))) return { type: "planmod", handle: m[1] };
+  if ((m = /^planmodal:(.+)$/.exec(id))) return { type: "planmodal", handle: m[1] };
+  if ((m = /^qopt:([^:]+):(\d+):(\d+)$/.exec(id))) return { type: "qopt", handle: m[1], q: Number(m[2]), o: Number(m[3]) };
+  if ((m = /^qsel:([^:]+):(\d+)$/.exec(id))) return { type: "qsel", handle: m[1], q: Number(m[2]) };
+  if ((m = /^qok:([^:]+):(\d+)$/.exec(id))) return { type: "qok", handle: m[1], q: Number(m[2]) };
+  if ((m = /^qother:([^:]+):(\d+)$/.exec(id))) return { type: "qother", handle: m[1], q: Number(m[2]) };
+  if ((m = /^qothermodal:([^:]+):(\d+)$/.exec(id))) return { type: "qothermodal", handle: m[1], q: Number(m[2]) };
   return null;
 }
 
-function buildComponents(handle, payload) {
+// Default "approval" kind: Allow / Deny + optional rich-suggestion buttons.
+function buildApprovalComponents(handle, payload) {
   const rows = [{
-    type: 1,
+    type: COMP_ACTION_ROW,
     components: [
-      { type: 2, style: BTN_SUCCESS, label: "Allow", custom_id: `approve:${handle}` },
-      { type: 2, style: BTN_DANGER, label: "Deny", custom_id: `deny:${handle}` },
+      { type: COMP_BUTTON, style: BTN_SUCCESS, label: "Allow", custom_id: `approve:${handle}` },
+      { type: COMP_BUTTON, style: BTN_DANGER, label: "Deny", custom_id: `deny:${handle}` },
     ],
   }];
   const suggestions = Array.isArray(payload.suggestions) ? payload.suggestions.slice(0, 5) : [];
   if (suggestions.length) {
     rows.push({
-      type: 1,
+      type: COMP_ACTION_ROW,
       components: suggestions.map((s) => ({
-        type: 2,
-        style: BTN_SECONDARY,
-        label: String(s.label || "Option").slice(0, 80),
+        type: COMP_BUTTON, style: BTN_SECONDARY,
+        label: clip(s.label || "Option", 80),
         custom_id: `sug:${handle}:${Number(s.index) || 0}`,
       })),
     });
@@ -59,35 +79,170 @@ function buildComponents(handle, payload) {
   return rows;
 }
 
+// Back-compat alias (kept for callers/tests that build the plain approval card).
+function buildComponents(handle, payload) {
+  return buildApprovalComponents(handle, payload);
+}
+
+// "plan" kind: Approve / Keep planning / Request changes (opens a feedback modal).
+function buildPlanComponents(handle) {
+  return [{
+    type: COMP_ACTION_ROW,
+    components: [
+      { type: COMP_BUTTON, style: BTN_SUCCESS, label: "Approve", custom_id: `approve:${handle}` },
+      { type: COMP_BUTTON, style: BTN_SECONDARY, label: "Keep planning", custom_id: `deny:${handle}` },
+      { type: COMP_BUTTON, style: BTN_PRIMARY, label: "Request changes", custom_id: `planmod:${handle}` },
+    ],
+  }];
+}
+
+// "question" kind: render ONE question at a time (sequential). custom_id and
+// select values carry the ORIGINAL option index (o.value), so the answer maps
+// back by index regardless of any options dropped during normalization.
+function buildQuestionBody(pending) {
+  const handle = pending.handle;
+  const qIdx = pending.qIndex;
+  const total = pending.questions.length;
+  const q = pending.questions[qIdx];
+  const useSelect = !!q.multiSelect || q.options.length > 5;
+  const lines = [];
+  if (total > 1) lines.push(`Question ${qIdx + 1} of ${total}`);
+  lines.push(q.question);
+  if (!useSelect) {
+    for (const o of q.options) {
+      if (o.description) lines.push(`• ${o.label} — ${o.description}`);
+    }
+  }
+  const description = clip(lines.join("\n\n"), 4096);
+  const rows = [];
+  if (useSelect) {
+    rows.push({
+      type: COMP_ACTION_ROW,
+      components: [{
+        type: COMP_STRING_SELECT,
+        custom_id: `qsel:${handle}:${qIdx}`,
+        placeholder: "Select…",
+        min_values: 1,
+        max_values: q.multiSelect ? Math.min(q.options.length, 25) : 1,
+        options: q.options.map((o) => {
+          const opt = { label: clip(o.label, 100), value: String(o.value) };
+          if (o.description) opt.description = clip(o.description, 100);
+          return opt;
+        }),
+      }],
+    });
+    rows.push({
+      type: COMP_ACTION_ROW,
+      components: [
+        { type: COMP_BUTTON, style: BTN_SUCCESS, label: "Confirm", custom_id: `qok:${handle}:${qIdx}` },
+        { type: COMP_BUTTON, style: BTN_SECONDARY, label: "Other…", custom_id: `qother:${handle}:${qIdx}` },
+      ],
+    });
+  } else {
+    const btns = q.options.map((o) => ({
+      type: COMP_BUTTON, style: BTN_PRIMARY, label: clip(o.label, 80),
+      custom_id: `qopt:${handle}:${qIdx}:${o.value}`,
+    }));
+    for (let i = 0; i < btns.length; i += 5) {
+      rows.push({ type: COMP_ACTION_ROW, components: btns.slice(i, i + 5) });
+    }
+    rows.push({
+      type: COMP_ACTION_ROW,
+      components: [{ type: COMP_BUTTON, style: BTN_SECONDARY, label: "Other…", custom_id: `qother:${handle}:${qIdx}` }],
+    });
+  }
+  return {
+    embeds: [{ title: clip(pending.payload.title || "Question", 256), description }],
+    components: rows,
+  };
+}
+
 function buildCardBody(handle, payload) {
   return {
-    embeds: [{
-      title: String(payload.title || "Approval request").slice(0, 256),
-      description: String(payload.detail || "").slice(0, 4096),
-    }],
-    components: buildComponents(handle, payload),
+    embeds: [{ title: clip(payload.title || "Approval request", 256), description: clip(payload.detail || "", 4096) }],
+    components: buildApprovalComponents(handle, payload),
+  };
+}
+
+// Initial message body for a pending request, dispatched by kind.
+function buildInitialBody(pending) {
+  if (pending.kind === "question") return buildQuestionBody(pending);
+  const components = pending.kind === "plan"
+    ? buildPlanComponents(pending.handle)
+    : buildApprovalComponents(pending.handle, pending.payload);
+  return {
+    embeds: [{ title: clip(pending.payload.title || "Approval request", 256), description: clip(pending.payload.detail || "", 4096) }],
+    components,
   };
 }
 
 function buildNeutralizedBody(payload, outcomeLine) {
   const base = String(payload.detail || "");
-  const description = `${base}\n\n${outcomeLine}`.slice(0, 4096);
+  const description = clip(`${base}\n\n${outcomeLine}`, 4096);
   return {
-    embeds: [{ title: String(payload.title || "Approval request").slice(0, 256), description }],
+    embeds: [{ title: clip(payload.title || "Approval request", 256), description }],
     components: [],
   };
+}
+
+function buildOtherModal(handle, qIdx, questionText) {
+  const label = clip(questionText || "Your answer", 45);
+  return {
+    type: CALLBACK_MODAL,
+    data: {
+      custom_id: `qothermodal:${handle}:${qIdx}`,
+      title: label,
+      components: [{
+        type: COMP_ACTION_ROW,
+        components: [{ type: COMP_TEXT_INPUT, custom_id: "answer", style: TEXT_INPUT_SHORT, label, required: true, max_length: 300 }],
+      }],
+    },
+  };
+}
+
+function buildPlanFeedbackModal(handle) {
+  return {
+    type: CALLBACK_MODAL,
+    data: {
+      custom_id: `planmodal:${handle}`,
+      title: "Request changes",
+      components: [{
+        type: COMP_ACTION_ROW,
+        components: [{ type: COMP_TEXT_INPUT, custom_id: "feedback", style: TEXT_INPUT_PARAGRAPH, label: "What should change?", required: true, max_length: 1000 }],
+      }],
+    },
+  };
+}
+
+function modalText(interaction) {
+  const rows = interaction && interaction.data && Array.isArray(interaction.data.components)
+    ? interaction.data.components : [];
+  for (const row of rows) {
+    const comps = row && Array.isArray(row.components) ? row.components : [];
+    for (const c of comps) {
+      if (c && typeof c.value === "string") return c.value;
+    }
+  }
+  return "";
 }
 
 function outcomeText(kind) {
   if (kind === "allow") return "✅ Approved via Discord";
   if (kind === "deny") return "⛔ Denied via Discord";
   if (kind === "suggestion") return "✅ Approved with an option via Discord";
+  if (kind === "answer") return "✅ Answered via Discord";
+  if (kind === "plan-approved") return "✅ Plan approved via Discord";
+  if (kind === "plan-deny") return "↩︎ Sent back for changes via Discord";
   return "↩︎ Resolved on another surface";
 }
 
 // Raw-https REST client. Each method resolves with parsed JSON (or null) on 2xx
 // and rejects with an Error carrying `.status` and Discord `.code` otherwise.
-function createDiscordRestClient({ token, https = require("https"), log = () => {} } = {}) {
+function createDiscordRestClient({ token, https = require("https"), agent, log = () => {} } = {}) {
+  // One warm keep-alive connection reused across calls (post, ack, neutralize)
+  // so we skip a fresh TLS handshake each time — matters most from high-RTT
+  // regions where every round trip to discord.com is ~300ms+.
+  const keepAliveAgent = agent || new https.Agent({ keepAlive: true, keepAliveMsecs: 30000, maxSockets: 8 });
   function request(method, route, body) {
     return new Promise((resolve, reject) => {
       const data = body != null ? JSON.stringify(body) : null;
@@ -106,6 +261,7 @@ function createDiscordRestClient({ token, https = require("https"), log = () => 
           path: `/api/${DISCORD_API_VERSION}${route}`,
           method,
           headers,
+          agent: keepAliveAgent,
         }, (res) => {
           let chunks = "";
           res.setEncoding("utf8");
@@ -260,10 +416,19 @@ class DiscordApprovalClient {
     this._pending = new Map();
     this._started = false;
     this._handleSeq = 0;
+    // The owner's DM channel id is stable; open it once and reuse it so every
+    // approval after the first skips a cross-continent round trip.
+    this._dmChannelId = "";
   }
 
   isEnabled() {
     return !!(this.token && this.ownerUserId);
+  }
+
+  // The remote-approval registry only routes "plan"/"question" kinds to adapters
+  // that opt in here; Telegram has no canHandle, so it stays approval-only.
+  canHandle(kind) {
+    return kind === "approval" || kind === "plan" || kind === "question";
   }
 
   start() {
@@ -295,6 +460,10 @@ class DiscordApprovalClient {
     const signal = options.signal;
     if (signal && signal.aborted) return Promise.resolve(null);
     if (!payload || !payload.title) return Promise.resolve(null);
+    const kind = payload.kind === "plan" || payload.kind === "question" ? payload.kind : "approval";
+    if (kind === "question" && !(Array.isArray(payload.questions) && payload.questions.length)) {
+      return Promise.resolve(null);
+    }
 
     const handle = this._mintHandle();
     return new Promise((resolve) => {
@@ -302,6 +471,11 @@ class DiscordApprovalClient {
       const pending = {
         handle,
         payload,
+        kind,
+        questions: kind === "question" ? payload.questions : null,
+        qIndex: 0,
+        answers: {},     // { [questionIndex]: { selected: number[], other?: string } }
+        sel: {},         // staged select-menu values awaiting "Confirm"
         messageRef: null,
         aborted: false,
         neutralized: false,
@@ -313,7 +487,7 @@ class DiscordApprovalClient {
         if (signal) { try { signal.removeEventListener("abort", onAbort); } catch {} }
         this._pending.delete(handle);
         if (decision === "allow" || decision === "deny") resolve(decision);
-        else if (decision && decision.action === "suggestion") resolve(decision);
+        else if (decision && (decision.action === "suggestion" || decision.action === "answer" || decision.action === "deny")) resolve(decision);
         else resolve(null);
       };
       const onAbort = () => {
@@ -336,17 +510,26 @@ class DiscordApprovalClient {
     });
   }
 
+  async _ensureDMChannel() {
+    if (this._dmChannelId) return this._dmChannelId;
+    const dm = await this.rest.createDMChannel(this.ownerUserId);
+    this._dmChannelId = (dm && dm.id) || "";
+    return this._dmChannelId;
+  }
+
   async _postCard(pending) {
-    const body = buildCardBody(pending.handle, pending.payload);
+    const body = buildInitialBody(pending);
+    const startedAt = Date.now();
     try {
-      const dm = await this.rest.createDMChannel(this.ownerUserId);
-      const channelId = dm && dm.id;
+      const channelId = await this._ensureDMChannel();
       const msg = await this.rest.createMessage(channelId, body);
+      this._log("info", `card posted in ${Date.now() - startedAt}ms`);
       return { channelId, messageId: msg && msg.id };
     } catch (err) {
       if (err && Number(err.code) === ERR_CANNOT_DM && this.fallbackChannelId) {
         try {
           const msg = await this.rest.createMessage(this.fallbackChannelId, body);
+          this._log("info", `card posted to fallback channel in ${Date.now() - startedAt}ms`);
           return { channelId: this.fallbackChannelId, messageId: msg && msg.id };
         } catch (err2) {
           this._log("warn", `discord fallback channel send failed: ${err2 && err2.message}`);
@@ -359,7 +542,9 @@ class DiscordApprovalClient {
   }
 
   _handleInteraction(interaction) {
-    if (!interaction || interaction.type !== 3) return; // MESSAGE_COMPONENT only
+    if (!interaction) return;
+    // 3 = MESSAGE_COMPONENT (button / select), 5 = MODAL_SUBMIT.
+    if (interaction.type !== 3 && interaction.type !== 5) return;
     const data = interaction.data || {};
     const parsed = parseCustomId(String(data.custom_id || ""));
     if (!parsed) return;
@@ -371,14 +556,82 @@ class DiscordApprovalClient {
       this._log("warn", "ignoring discord interaction from a non-owner user");
       return;
     }
-    // ACK within Discord's 3s deadline with a deferred update; the actual card
-    // rewrite (neutralization) happens as a best-effort message edit afterwards.
-    Promise.resolve(this.rest.interactionCallback(interaction.id, interaction.token, { type: CALLBACK_DEFERRED_UPDATE }))
-      .catch((err) => this._log("warn", `discord interaction ack failed: ${err && err.message}`));
 
-    this._neutralize(pending, outcomeText(parsed.action));
-    if (parsed.action === "suggestion") pending.finish({ action: "suggestion", index: parsed.index });
-    else pending.finish(parsed.action);
+    switch (parsed.type) {
+      case "approve":
+        this._ackDeferred(interaction);
+        this._neutralize(pending, outcomeText(pending.kind === "plan" ? "plan-approved" : "allow"));
+        pending.finish("allow");
+        return;
+      case "deny":
+        this._ackDeferred(interaction);
+        this._neutralize(pending, outcomeText(pending.kind === "plan" ? "plan-deny" : "deny"));
+        // Plan "Keep planning" is a deny with no specific feedback.
+        pending.finish(pending.kind === "plan" ? { action: "deny" } : "deny");
+        return;
+      case "suggestion":
+        this._ackDeferred(interaction);
+        this._neutralize(pending, outcomeText("suggestion"));
+        pending.finish({ action: "suggestion", index: parsed.index });
+        return;
+      case "planmod":
+        // Opening the modal IS the ACK — do not also send a deferred update.
+        this._respond(interaction, buildPlanFeedbackModal(pending.handle));
+        return;
+      case "planmodal": {
+        const feedback = modalText(interaction).trim();
+        this._ackDeferred(interaction);
+        this._neutralize(pending, outcomeText("plan-deny"));
+        pending.finish(feedback ? { action: "deny", message: feedback } : { action: "deny" });
+        return;
+      }
+      case "qopt":
+        pending.answers[parsed.q] = { selected: [parsed.o] };
+        this._advanceQuestion(interaction, pending);
+        return;
+      case "qsel":
+        pending.sel[parsed.q] = (Array.isArray(data.values) ? data.values : [])
+          .map((v) => Number(v)).filter((n) => Number.isInteger(n));
+        this._ackDeferred(interaction); // keep the card; wait for Confirm
+        return;
+      case "qok":
+        pending.answers[parsed.q] = { selected: pending.sel[parsed.q] || [] };
+        this._advanceQuestion(interaction, pending);
+        return;
+      case "qother": {
+        const q = pending.questions[parsed.q];
+        this._respond(interaction, buildOtherModal(pending.handle, parsed.q, q && q.question));
+        return;
+      }
+      case "qothermodal":
+        pending.answers[parsed.q] = { selected: [], other: modalText(interaction).trim() };
+        this._advanceQuestion(interaction, pending);
+        return;
+      default:
+        return;
+    }
+  }
+
+  _respond(interaction, payload) {
+    Promise.resolve(this.rest.interactionCallback(interaction.id, interaction.token, payload))
+      .catch((err) => this._log("warn", `discord interaction response failed: ${err && err.message}`));
+  }
+
+  _ackDeferred(interaction) {
+    this._respond(interaction, { type: CALLBACK_DEFERRED_UPDATE });
+  }
+
+  // Sequential questions: rewrite the source message to the next question, or
+  // finish with the accumulated answers when the last one is done.
+  _advanceQuestion(interaction, pending) {
+    pending.qIndex += 1;
+    if (pending.qIndex < pending.questions.length) {
+      this._respond(interaction, { type: CALLBACK_UPDATE_MESSAGE, data: buildQuestionBody(pending) });
+      return;
+    }
+    pending.neutralized = true;
+    this._respond(interaction, { type: CALLBACK_UPDATE_MESSAGE, data: buildNeutralizedBody(pending.payload, outcomeText("answer")) });
+    pending.finish({ action: "answer", answers: pending.answers });
   }
 
   _neutralize(pending, outcomeLine) {
@@ -398,6 +651,14 @@ module.exports = {
   createDiscordGateway,
   parseCustomId,
   buildComponents,
+  buildApprovalComponents,
+  buildPlanComponents,
+  buildQuestionBody,
+  buildInitialBody,
   buildCardBody,
   buildNeutralizedBody,
+  buildOtherModal,
+  buildPlanFeedbackModal,
+  modalText,
+  outcomeText,
 };

@@ -615,14 +615,8 @@ describe("server-route-permission POST", () => {
     assert.match(res.ctx.calls.logs.join("\n"), /sidecar unavailable/);
   });
 
-  it("does not start remote approval for elicitation, passthrough, DND, or opencode paths", async () => {
+  it("does not start remote approval for passthrough, DND, or opencode paths", async () => {
     const cases = [
-      {
-        body: { tool_name: "ExitPlanMode", tool_input: { plan: "ship it" } },
-      },
-      {
-        body: { tool_name: "AskUserQuestion", tool_input: { questions: [] } },
-      },
       {
         body: { tool_name: "TaskList", tool_input: {} },
         ctx: { PASSTHROUGH_TOOLS: new Set(["TaskList"]) },
@@ -645,6 +639,22 @@ describe("server-route-permission POST", () => {
     for (const item of cases) {
       const res = await callPermissionPost(JSON.stringify(item.body), { ctx: item.ctx || {} });
       assert.deepStrictEqual(res.ctx.calls.maybeStartRemoteApproval, [], item.body.tool_name);
+    }
+  });
+
+  // ExitPlanMode (plan) and AskUserQuestion (elicitation) now reach the seam;
+  // whether a card actually fires is decided there (rich agent + an adapter that
+  // canHandle the plan/question kind), not at the route.
+  it("offers remote approval for ExitPlanMode and AskUserQuestion (seam gates the kind)", async () => {
+    const cases = [
+      { tool_name: "ExitPlanMode", tool_input: { plan: "ship it" } },
+      { tool_name: "AskUserQuestion", tool_input: { questions: [] } },
+    ];
+
+    for (const body of cases) {
+      const res = await callPermissionPost(JSON.stringify(body));
+      assert.strictEqual(res.ctx.calls.maybeStartRemoteApproval.length, 1, body.tool_name);
+      assert.strictEqual(res.ctx.calls.maybeStartRemoteApproval[0].toolName, body.tool_name);
     }
   });
 
