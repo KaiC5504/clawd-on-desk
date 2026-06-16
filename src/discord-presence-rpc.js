@@ -10,8 +10,11 @@ const { normalizeDiscordPresence, DEFAULT_CLAWD_DISCORD_APP_ID } = require("./di
 const OP = Object.freeze({ HANDSHAKE: 0, FRAME: 1, CLOSE: 2, PING: 3, PONG: 4 });
 
 // External GIF URLs animate in large_image (uploaded portal assets can't), so the
-// presence mirrors the live clawd sprite without anyone uploading art.
-const GIF_BASE_URL = "https://raw.githubusercontent.com/rullerzhou-afk/clawd-on-desk/main/assets/gif";
+// presence mirrors the live clawd sprite without anyone uploading art. These are the
+// enlarged variants (assets/discord-presence, built by tools/build-discord-presence-gifs.py)
+// that fill the card instead of floating tiny in the source canvas. Pinned to a fork commit
+// so the media proxy gets a stable, cache-clean URL; bump the SHA when sprites are regenerated.
+const GIF_BASE_URL = "https://raw.githubusercontent.com/KaiC5504/clawd-on-desk/d844d99dcf9d6e33d1ec0ae34012ac6ac8182bc2/assets/discord-presence";
 
 // Clawd sprite + label per resolved presence state (see resolvePresenceState).
 const STATE_GIF = Object.freeze({
