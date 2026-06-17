@@ -40,10 +40,11 @@ function validateDiscordPresence(value) {
   return { status: "ok" };
 }
 
-// Mirrors telegram-approval-settings.readiness().
-function readiness(config) {
+// Mirrors telegram-approval-settings.readiness(). defaultAppId is injectable so
+// the BYO handoff path can be tested while the shipped constant is still empty.
+function readiness(config, defaultAppId = DEFAULT_CLAWD_DISCORD_APP_ID) {
   const cfg = normalizeDiscordPresence(config);
-  const appId = cfg.applicationId || DEFAULT_CLAWD_DISCORD_APP_ID;
+  const appId = cfg.applicationId || defaultAppId;
   if (!cfg.enabled) return { ready: false, reason: "disabled", config: cfg };
   if (!appId) return { ready: false, reason: "no-app-id", config: cfg };
   return { ready: true, appId, config: cfg };

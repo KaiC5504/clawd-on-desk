@@ -4,6 +4,8 @@
 //
 // Surface: window.settingsAPI
 //
+//   discordDefaultAppIdPresent          boolean — a default Discord App ID is
+//                                       hardcoded (maintainer-shipped)
 //   getSnapshot()                       Promise<snapshot>
 //   update(key, value)                  Promise<{ status, message? }>
 //   command(action, payload)            Promise<{ status, message? }>
@@ -21,6 +23,7 @@
 // plan-settings-panel.md §4.2.
 
 const { contextBridge, ipcRenderer } = require("electron");
+const { DEFAULT_CLAWD_DISCORD_APP_ID } = require("./discord-presence-settings");
 
 const listeners = new Set();
 const shortcutFailureListeners = new Set();
@@ -69,6 +72,9 @@ ipcRenderer.on("settings:text-scale-context-changed", () => {
 });
 
 contextBridge.exposeInMainWorld("settingsAPI", {
+  // Capability flag: true when a default Discord App ID is hardcoded (maintainer-
+  // shipped), so the presence enable switch can be ready without a user-saved App ID.
+  discordDefaultAppIdPresent: !!DEFAULT_CLAWD_DISCORD_APP_ID,
   getSnapshot: () => ipcRenderer.invoke("settings:get-snapshot"),
   getShortcutFailures: () => ipcRenderer.invoke("settings:getShortcutFailures"),
   getAnimationOverridesData: () => ipcRenderer.invoke("settings:get-animation-overrides-data"),

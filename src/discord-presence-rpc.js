@@ -46,7 +46,9 @@ function buildPresencePayload(session, privacy = {}) {
     assets: { large_image: CLAWD_ICON_URL, large_text: "Clawd on Desk" },
   };
   if (privacy.privacyShowProject && session && session.cwd) {
-    activity.state = `${COARSE_LABEL[coarse]} · ${path.basename(session.cwd)}`;
+    // win32.basename splits on both \ and /, so a Windows cwd seen on a POSIX
+    // host yields just the folder name instead of leaking the whole path.
+    activity.state = `${COARSE_LABEL[coarse]} · ${path.win32.basename(session.cwd)}`;
   }
   // Allowlist by design: the snapshot also carries sensitive fields
   // (sessionTitle, assistantLastOutput, ...) we deliberately never read.
@@ -96,7 +98,10 @@ function pickDominantSession(snapshot) {
   let best = null;
   let bestPriority = -1;
   for (const s of sessions) {
-    if (!s || s.headless) continue;
+    // Mirror session-hud.js isHudSession() so Discord and the HUD agree on which
+    // session is "active" (this also drops superseded Codex sessions, which the
+    // snapshot builder folds into hiddenFromHud).
+    if (!s || s.headless || s.state === "sleeping" || s.hiddenFromHud) continue;
     const p = getStatePriority(s.state, STATE_PRIORITY);
     if (p > bestPriority) { bestPriority = p; best = s; }
   }
@@ -104,10 +109,14 @@ function pickDominantSession(snapshot) {
 }
 
 // Presence bridge over Discord's local IPC pipe. Offline is non-fatal.
-function createDiscordPresenceBridge({ getConfig, log } = {}) {
+function createDiscordPresenceBridge({ getConfig, log, createConnection, ipcPaths } = {}) {
   const logFn = typeof log === "function" ? log : () => {};
+  // Injectable for tests; defaults dial the real Discord IPC pipe.
+  const dialSocket = typeof createConnection === "function" ? createConnection : (p) => net.connect({ path: p });
+  const listCandidates = typeof ipcPaths === "function" ? ipcPaths : ipcCandidatePaths;
 
   let socket = null;
+  let pendingSocket = null; // in-flight candidate, not yet adopted as `socket`
   let connecting = false;
   let connected = false; // handshake READY received
   let stopped = true;
@@ -136,11 +145,15 @@ function createDiscordPresenceBridge({ getConfig, log } = {}) {
   function clearReady() { if (readyTimer) { clearTimeout(readyTimer); readyTimer = null; } }
 
   function teardownSocket() {
-    if (socket) {
-      try { socket.removeAllListeners(); } catch {}
-      try { socket.destroy(); } catch {}
-      socket = null;
+    // Tear down both the live socket and any in-flight candidate, so a re-dial
+    // mid-connect can't orphan a socket (listeners attached, never destroyed).
+    for (const sk of [socket, pendingSocket]) {
+      if (!sk) continue;
+      try { sk.removeAllListeners(); } catch {}
+      try { sk.destroy(); } catch {}
     }
+    socket = null;
+    pendingSocket = null;
   }
 
   function scheduleReconnect() {
@@ -163,6 +176,19 @@ function createDiscordPresenceBridge({ getConfig, log } = {}) {
     teardownSocket();
     if (stopped) return;
     scheduleReconnect();
+  }
+
+  // Drop the live socket and re-dial immediately (no backoff). Used when the
+  // App ID changed: connect() re-resolves it, and lastActivity replays on READY.
+  function forceReconnect() {
+    connected = false;
+    connecting = false;
+    buf = Buffer.alloc(0);
+    clearFlush();
+    clearReady();
+    teardownSocket();
+    reconnectAttempts = 0;
+    connect();
   }
 
   function send(op, dataObj) {
@@ -242,24 +268,42 @@ function createDiscordPresenceBridge({ getConfig, log } = {}) {
     if (idx >= candidates.length) {
       // no pipe => Discord not running; back off
       connecting = false;
+      logFn("info", "discord not reachable (no IPC pipe); will retry");
       scheduleReconnect();
       return;
     }
-    const s = net.connect({ path: candidates[idx] });
+    let s;
+    try {
+      s = dialSocket(candidates[idx]);
+    } catch (err) {
+      // net.connect can throw synchronously (EMFILE/ENFILE, bad path). Recover
+      // instead of wedging with connecting=true forever.
+      connecting = false;
+      logFn("warn", `discord dial failed: ${(err && err.message) || err}`);
+      scheduleReconnect();
+      return;
+    }
+    pendingSocket = s;
     let settled = false;
     s.once("connect", () => {
       settled = true;
+      // A newer dial (App ID change / restart) may have superseded this one.
+      if (stopped || socket || s !== pendingSocket) { try { s.destroy(); } catch {} return; }
+      pendingSocket = null;
       s.removeAllListeners("error");
       socket = s;
       attachSocket(s);
       send(OP.HANDSHAKE, { v: 1, client_id: appId });
       clearReady();
-      readyTimer = setTimeout(() => { if (!connected) handleDisconnect(); }, READY_TIMEOUT_MS);
+      readyTimer = setTimeout(() => {
+        if (!connected) { logFn("warn", "discord handshake timed out (check Application ID)"); handleDisconnect(); }
+      }, READY_TIMEOUT_MS);
       if (readyTimer.unref) readyTimer.unref();
     });
     s.once("error", () => {
       if (settled) return;
       try { s.destroy(); } catch {}
+      if (s === pendingSocket) pendingSocket = null;
       tryCandidate(candidates, idx + 1);
     });
   }
@@ -269,13 +313,15 @@ function createDiscordPresenceBridge({ getConfig, log } = {}) {
     appId = resolveAppId();
     if (!appId) { scheduleReconnect(); return; }
     connecting = true;
-    tryCandidate(ipcCandidatePaths(), 0);
+    tryCandidate(listCandidates(), 0);
   }
 
   return {
     start() {
       stopped = false;
       clearReconnect();
+      // Re-dial with the new client_id if the App ID changed while connected or mid-connect.
+      if ((connected || connecting) && resolveAppId() !== appId) { forceReconnect(); return; }
       connect();
     },
     stop() {
