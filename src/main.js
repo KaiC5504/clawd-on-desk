@@ -527,6 +527,7 @@ const settingsWindowRuntime = createSettingsWindowRuntime({
   isWin,
   nativeTheme,
   path,
+  discordDefaultAppIdPresent: !!discordPresenceSettings.DEFAULT_CLAWD_DISCORD_APP_ID,
   getPetWindowBounds: () => getPetWindowBounds(),
   getNearestWorkArea: (cx, cy) => getNearestWorkArea(cx, cy),
   getTextScale: () => effectiveTextScaleForKey(getSettingsDisplayKey()),
