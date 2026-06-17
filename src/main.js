@@ -88,6 +88,10 @@ const initPermission = require("./permission");
 const { registerPermissionIpc } = initPermission;
 const { createTelegramApprovalSidecar } = require("./telegram-approval-sidecar");
 const telegramApprovalSettings = require("./telegram-approval-settings");
+const discordPresenceSettings = require("./discord-presence-settings");
+const discordApprovalSettings = require("./discord-approval-settings");
+const { DiscordApprovalClient } = require("./discord-approval-client");
+const { createDiscordPresenceBridge } = require("./discord-presence-rpc");
 const {
   buildTelegramApprovalStatus,
   isNativeTelegramApprovalSelected,
@@ -299,7 +303,12 @@ let _telegramMigrationController = null;
 let telegramNativeRunner = null;
 let telegramCompanion = null;
 let telegramDirectSend = null;
+let discordPresenceBridge = null;
 let suppressTelegramApprovalSidecarSync = 0;
+let discordApprovalClient = null;
+let discordApprovalConfigSignature = "";
+let discordApprovalTokenRevision = 0;
+let discordApprovalSyncPromise = Promise.resolve();
 let hardwareBuddyAdapter = null;
 let hardwareBuddyStatus = null;
 let hardwareBuddyTestApprovalPromise = null;
@@ -349,6 +358,9 @@ const _settingsController = createSettingsController({
     getTelegramApprovalStatus: () => getTelegramApprovalStatus(),
     getTelegramApprovalTokenInfo: () => getTelegramApprovalTokenInfo(),
     sendTelegramApprovalTest: () => sendTelegramApprovalTest(),
+    writeDiscordApprovalToken: (token) => writeDiscordApprovalToken(token),
+    getDiscordApprovalTokenInfo: () => getDiscordApprovalTokenInfo(),
+    sendDiscordApprovalTest: () => sendDiscordApprovalTest(),
     deleteTelegramApprovalTokenFile: () => deleteTelegramApprovalTokenFile(),
     // Lazy getter so settings-actions can use the controller even though it's
     // instantiated below (forward-reference).
@@ -1209,6 +1221,17 @@ const _permCtx = {
   clearShortcutFailure: (actionId) => shortcutRuntime.clearFailure(actionId),
   repositionUpdateBubble: () => repositionUpdateBubble(),
   getTelegramApprovalClient: () => getTelegramApprovalClient(),
+  // Remote-approval registry (priority order): Telegram first, then Discord.
+  // permission.js picks the first enabled adapter; the rest of the approval
+  // flow (payload, abort, idempotent resolve) is adapter-agnostic.
+  getRemoteApprovalClients: () => {
+    const out = [];
+    const tg = getTelegramApprovalClient();
+    if (tg) out.push(tg);
+    const discord = getDiscordApprovalClient();
+    if (discord) out.push(discord);
+    return out;
+  },
   onPermissionsChanged: () => {
     if (hardwareBuddyAdapter) hardwareBuddyAdapter.notifyPermissionsChanged();
   },
@@ -1359,6 +1382,9 @@ const _stateCtx = {
     // broadcast — the companion computes synchronously and fires sends async.
     if (telegramCompanion) {
       try { telegramCompanion.onSnapshot(snapshot); } catch {}
+    }
+    if (discordPresenceBridge) {
+      try { discordPresenceBridge.onSnapshot(snapshot); } catch {}
     }
     if (_lanWss) { try { _lanWss.onSnapshot(); } catch {} }
   },
@@ -2280,6 +2306,221 @@ function queueTelegramApprovalSidecarSync(reason) {
   return telegramApprovalSyncPromise;
 }
 
+// In-process IPC bridge fed by the session-snapshot subscription.
+function startDiscordPresence() {
+  const config = _settingsController.getSnapshot().discordPresence;
+  const ready = discordPresenceSettings.readiness(config);
+  if (!ready.ready) return false;
+  if (!discordPresenceBridge) {
+    discordPresenceBridge = createDiscordPresenceBridge({
+      getConfig: () => _settingsController.getSnapshot().discordPresence,
+      log: (level, msg) => {
+        try { sessionLog(`[discord-presence] ${level}: ${msg}`); } catch {}
+        // Surface warnings (e.g. wrong App ID) on the house channel; the debug
+        // log alone is invisible to an ordinary user.
+        if (level === "warn") { try { console.warn(`Clawd: discord presence: ${msg}`); } catch {} }
+      },
+    });
+  }
+  discordPresenceBridge.start();
+  // Force a replay; the broadcast is otherwise change-gated.
+  try { _state.emitSessionSnapshot({ force: true }); } catch {}
+  return true;
+}
+
+function syncDiscordPresence(reason = "settings") {
+  const config = _settingsController.getSnapshot().discordPresence;
+  const ready = discordPresenceSettings.readiness(config);
+  if (!ready.ready) {
+    if (discordPresenceBridge) discordPresenceBridge.stop();
+    try { sessionLog(`[discord-presence] sync ${reason}: off (${ready.reason})`); } catch {}
+    return false;
+  }
+  try { sessionLog(`[discord-presence] sync ${reason}: on`); } catch {}
+  return startDiscordPresence();
+}
+
+// ── Discord interactive-approval adapter (in-process, no spawned binary) ──
+// Third remote-approval channel behind the same seam as Telegram. The Gateway
+// WebSocket lives in this process (DiscordApprovalClient), so the "sidecar"
+// here is just a client object whose lifecycle tracks a config+token signature.
+
+function discordApprovalLog(level, message) {
+  try { permLog(`discord approval ${level}: ${message}`); } catch {}
+}
+
+function getDiscordApprovalConfig() {
+  return discordApprovalSettings.normalizeDiscordApproval(_settingsController.get("discordApproval"));
+}
+
+// Canonical path only — no env-var override, mirroring the Telegram token-file
+// invariant. The bot token lives solely at userData/discord-approval.env.
+function getDiscordApprovalPaths() {
+  const userDataDir = app.getPath("userData");
+  return {
+    userDataDir,
+    tokenEnvFilePath: discordApprovalSettings.defaultTokenEnvFilePath(userDataDir),
+  };
+}
+
+function getDiscordApprovalTokenStatus() {
+  const paths = getDiscordApprovalPaths();
+  return discordApprovalSettings.tokenStatus({ fs, filePath: paths.tokenEnvFilePath });
+}
+
+function getDiscordApprovalTokenInfo() {
+  const paths = getDiscordApprovalPaths();
+  const status = discordApprovalSettings.tokenStatus({ fs, filePath: paths.tokenEnvFilePath });
+  if (!status.tokenStored) return { configured: false, masked: "" };
+  return {
+    configured: true,
+    masked: discordApprovalSettings.readMaskedBotToken({ fs, filePath: paths.tokenEnvFilePath }),
+  };
+}
+
+function writeDiscordApprovalToken(token) {
+  const paths = getDiscordApprovalPaths();
+  const result = discordApprovalSettings.writeTokenEnvFile({
+    fs,
+    path,
+    filePath: paths.tokenEnvFilePath,
+    token,
+    platform: process.platform,
+  });
+  if (result && result.status === "ok") {
+    discordApprovalTokenRevision += 1;
+    queueDiscordApprovalClientSync("token");
+  }
+  return result;
+}
+
+// Only handed to the approval registry when enabled (and thus connected).
+function getDiscordApprovalClient() {
+  if (!discordApprovalClient || typeof discordApprovalClient.isEnabled !== "function") return null;
+  return discordApprovalClient.isEnabled() ? discordApprovalClient : null;
+}
+
+function buildDiscordApprovalSignature(config, paths, tokenStatus) {
+  return JSON.stringify({
+    enabled: config.enabled === true,
+    ownerUserId: config.ownerUserId,
+    fallbackChannelId: config.fallbackChannelId,
+    tokenEnvFilePath: paths.tokenEnvFilePath,
+    tokenStored: tokenStatus.tokenStored === true,
+    tokenFileMtimeMs: tokenStatus.tokenFileMtimeMs || 0,
+    tokenRevision: discordApprovalTokenRevision,
+  });
+}
+
+function stopDiscordApprovalClient() {
+  const client = discordApprovalClient;
+  discordApprovalClient = null;
+  discordApprovalConfigSignature = "";
+  if (client && typeof client.stop === "function") {
+    try { client.stop(); } catch (err) { discordApprovalLog("warn", `stop failed: ${err && err.message}`); }
+  }
+}
+
+async function startDiscordApprovalClient() {
+  const config = getDiscordApprovalConfig();
+  const paths = getDiscordApprovalPaths();
+  const tokenStatus = getDiscordApprovalTokenStatus();
+  const ready = discordApprovalSettings.readiness(config, tokenStatus);
+  if (!ready.ready) {
+    if (ready.reason !== "disabled") discordApprovalLog("info", ready.message || ready.reason || "not configured");
+    return false;
+  }
+  const signature = buildDiscordApprovalSignature(config, paths, tokenStatus);
+  if (discordApprovalClient && discordApprovalConfigSignature === signature) return true;
+  if (discordApprovalClient) stopDiscordApprovalClient();
+
+  // The raw token never leaves main; read it here only to construct the client.
+  const { envFileTokenStore } = require("./discord-token-store");
+  const store = envFileTokenStore({ filePath: paths.tokenEnvFilePath });
+  const token = await store.getToken();
+  if (!token) { discordApprovalLog("warn", "token file unreadable"); return false; }
+
+  discordApprovalClient = new DiscordApprovalClient({
+    token,
+    ownerUserId: config.ownerUserId,
+    fallbackChannelId: config.fallbackChannelId,
+    log: discordApprovalLog,
+  });
+  discordApprovalConfigSignature = signature;
+  try {
+    discordApprovalClient.start();
+    discordApprovalLog("info", "running");
+    return true;
+  } catch (err) {
+    discordApprovalLog("warn", `start failed: ${err && err.message}`);
+    stopDiscordApprovalClient();
+    return false;
+  }
+}
+
+async function syncDiscordApprovalClient(reason = "settings") {
+  const config = getDiscordApprovalConfig();
+  const paths = getDiscordApprovalPaths();
+  const tokenStatus = getDiscordApprovalTokenStatus();
+  const ready = discordApprovalSettings.readiness(config, tokenStatus);
+  if (!ready.ready) {
+    if (discordApprovalClient) stopDiscordApprovalClient();
+    return false;
+  }
+  const nextSignature = buildDiscordApprovalSignature(config, paths, tokenStatus);
+  if (discordApprovalClient && discordApprovalConfigSignature !== nextSignature) {
+    stopDiscordApprovalClient();
+  }
+  const started = await startDiscordApprovalClient();
+  if (started) discordApprovalLog("debug", `sync ${reason}`);
+  return started;
+}
+
+function queueDiscordApprovalClientSync(reason) {
+  discordApprovalSyncPromise = discordApprovalSyncPromise
+    .catch(() => {})
+    .then(() => syncDiscordApprovalClient(reason));
+  return discordApprovalSyncPromise;
+}
+
+function getDiscordApprovalStatus() {
+  const config = getDiscordApprovalConfig();
+  const tokenStatus = getDiscordApprovalTokenStatus();
+  const ready = discordApprovalSettings.readiness(config, tokenStatus);
+  return {
+    status: discordApprovalClient ? "running" : "stopped",
+    enabled: config.enabled === true,
+    configured: ready.ready === true,
+    reason: ready.reason,
+    message: ready.message,
+    tokenStored: tokenStatus.tokenStored === true,
+  };
+}
+
+async function sendDiscordApprovalTest() {
+  await queueDiscordApprovalClientSync("test");
+  const client = getDiscordApprovalClient();
+  if (!client || typeof client.requestApproval !== "function") {
+    const status = getDiscordApprovalStatus();
+    return { status: "error", message: status.message || "Discord approval is not running" };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 60 * 1000);
+  try {
+    const decision = await client.requestApproval({
+      title: "Clawd Discord approval test",
+      detail: "This is a settings test card. It is not attached to any agent permission request.",
+    }, { signal: controller.signal });
+    if (decision === "allow" || decision === "deny") return { status: "ok", decision };
+    if (decision && (decision.action === "allow" || decision.action === "deny")) {
+      return { status: "ok", decision: decision.action };
+    }
+    return { status: "error", message: "Discord test did not receive a button response" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function telegramApprovalUnavailableMessage(status) {
   if (status && status.message) return status.message;
   if (status && status.reason === "disabled") return "Telegram approval is disabled";
@@ -2902,6 +3143,12 @@ settingsEffectRouter.start();
 _settingsController.subscribeKey("tgApproval", () => {
   if (suppressTelegramApprovalSidecarSync > 0) return;
   queueTelegramApprovalSidecarSync("settings");
+});
+_settingsController.subscribeKey("discordPresence", () => {
+  syncDiscordPresence("settings");
+});
+_settingsController.subscribeKey("discordApproval", () => {
+  queueDiscordApprovalClientSync("settings");
 });
 _settingsController.subscribeKey("mobilePreviewEnabled", async (enabled) => {
   if (enabled) {
@@ -3545,6 +3792,9 @@ if (!gotTheLock) {
     initTelegramMigrationController().catch((err) => {
       console.warn("Clawd: migration controller init failed:", err && err.message);
     });
+    try { syncDiscordPresence("startup"); }
+    catch (err) { console.warn("Clawd: discord presence startup failed:", err && err.message); }
+    queueDiscordApprovalClientSync("startup");
     createWindow();
     // macOS: bridge the OS app-hidden state (⌘H / Dock right-click → 隐藏) to the
     // pet. Pet windows are setCanHide:NO, so the OS marks the app hidden but the

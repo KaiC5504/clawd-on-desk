@@ -1,6 +1,8 @@
 node_modules/
 dist/
 .env
+# Approval bot tokens live in userData (outside the repo); this is belt-and-suspenders.
+*-approval.env
 __pycache__/
 *.pyc
 .DS_Store
