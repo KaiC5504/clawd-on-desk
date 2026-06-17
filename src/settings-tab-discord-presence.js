@@ -134,7 +134,9 @@
 
   function buildEnabledRow() {
     const cfg = currentConfig();
-    const ready = !!cfg.applicationId;
+    // A baked-in default App ID makes presence usable without a user-saved one,
+    // matching readiness() in discord-presence-settings.js.
+    const ready = !!(cfg.applicationId || (window.settingsAPI && window.settingsAPI.discordDefaultAppIdPresent));
     const row = document.createElement("div");
     row.className = "row";
     if (!ready) row.classList.add("tg-approval-row-disabled");

@@ -2313,7 +2313,12 @@ function startDiscordPresence() {
   if (!discordPresenceBridge) {
     discordPresenceBridge = createDiscordPresenceBridge({
       getConfig: () => _settingsController.getSnapshot().discordPresence,
-      log: (_level, msg) => { try { sessionLog(`[discord-presence] ${msg}`); } catch {} },
+      log: (level, msg) => {
+        try { sessionLog(`[discord-presence] ${level}: ${msg}`); } catch {}
+        // Surface warnings (e.g. wrong App ID) on the house channel; the debug
+        // log alone is invisible to an ordinary user.
+        if (level === "warn") { try { console.warn(`Clawd: discord presence: ${msg}`); } catch {} }
+      },
     });
   }
   discordPresenceBridge.start();
@@ -3754,7 +3759,8 @@ if (!gotTheLock) {
     initTelegramMigrationController().catch((err) => {
       console.warn("Clawd: migration controller init failed:", err && err.message);
     });
-    syncDiscordPresence("startup");
+    try { syncDiscordPresence("startup"); }
+    catch (err) { console.warn("Clawd: discord presence startup failed:", err && err.message); }
     queueDiscordApprovalClientSync("startup");
     createWindow();
     // macOS: bridge the OS app-hidden state (⌘H / Dock right-click → 隐藏) to the
