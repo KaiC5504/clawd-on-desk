@@ -518,6 +518,7 @@ const settingsWindowRuntime = createSettingsWindowRuntime({
   isWin,
   nativeTheme,
   path,
+  discordDefaultAppIdPresent: !!discordPresenceSettings.DEFAULT_CLAWD_DISCORD_APP_ID,
   getPetWindowBounds: () => getPetWindowBounds(),
   getNearestWorkArea: (cx, cy) => getNearestWorkArea(cx, cy),
   getTextScale: () => effectiveTextScaleForKey(getSettingsDisplayKey()),
@@ -3621,6 +3622,7 @@ if (!gotTheLock) {
     globalShortcut.unregisterAll();
     void settingsSizePreviewSession.cleanup();
     stopTelegramApprovalSidecar();
+    if (discordPresenceBridge) discordPresenceBridge.stop();
     if (typeof unsubscribeHardwareBuddySettings === "function") {
       unsubscribeHardwareBuddySettings();
       unsubscribeHardwareBuddySettings = null;

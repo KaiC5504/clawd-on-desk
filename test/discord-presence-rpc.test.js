@@ -3,6 +3,8 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
+const fs = require("node:fs");
+const path = require("node:path");
 const {
   toCoarseState,
   buildPresencePayload,
@@ -198,4 +200,64 @@ test("encodeFrame/decodeFrames round-trips opcode + JSON across split chunks", (
   assert.strictEqual(dec.frames[0].op, OP.HANDSHAKE);
   assert.deepStrictEqual(dec.frames[0].data, payload);
   assert.strictEqual(dec.rest.length, 0);
+});
+
+test("before-quit stops the Discord presence bridge before tearing down session state", () => {
+  // Source-text guard mirroring hardware-buddy-adapter.test.js: a refactor that
+  // drops this cleanup would otherwise silently strand presence on quit again.
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "main.js"), "utf8");
+  const start = source.indexOf('app.on("before-quit"');
+  const end = source.indexOf('app.on("window-all-closed"', start);
+  const block = source.slice(start, end);
+  const bridgeStop = block.indexOf("discordPresenceBridge.stop()");
+  const stateCleanup = block.indexOf("_state.cleanup()");
+  assert.ok(bridgeStop !== -1, "before-quit should stop the Discord presence bridge");
+  assert.ok(stateCleanup !== -1, "before-quit should clean up session state");
+  // The bridge consumes the session-snapshot subscription, so stop it before _state.
+  assert.ok(bridgeStop < stateCleanup, "presence bridge must stop before _state.cleanup()");
+});
+
+test("stop() resets the reconnect backoff so a later start() dials at the base delay", () => {
+  // reconnectAttempts is a closure private; the only observable is the delay
+  // scheduleReconnect() hands setTimeout, so capture it instead of firing it.
+  const cfg = { enabled: true, applicationId: "111111111111111111" };
+  const sockets = [];
+  const realSetTimeout = global.setTimeout;
+  const scheduled = [];
+  global.setTimeout = (fn, delay) => {
+    scheduled.push({ fn, delay });
+    return { unref() {} };
+  };
+  try {
+    const bridge = createDiscordPresenceBridge({
+      getConfig: () => cfg,
+      ipcPaths: () => ["fake-pipe"], // single candidate -> one error exhausts the list -> backoff
+      createConnection: () => { const s = new FakeIpcSocket(); sockets.push(s); return s; },
+    });
+    // Pre-connect error exhausts the candidate list and schedules a backoff dial.
+    const dialAndFail = () => sockets[sockets.length - 1].emit("error");
+
+    bridge.start();
+    dialAndFail();
+    assert.strictEqual(scheduled.at(-1).delay, 2000, "attempt 1 -> 2s");
+
+    scheduled.at(-1).fn();   // fire reconnect -> re-dial
+    dialAndFail();
+    assert.strictEqual(scheduled.at(-1).delay, 4000, "attempt 2 -> 4s");
+
+    scheduled.at(-1).fn();
+    dialAndFail();
+    assert.strictEqual(scheduled.at(-1).delay, 8000, "attempt 3 -> 8s");
+
+    bridge.stop();           // must reset reconnectAttempts to 0
+    const before = scheduled.length;
+    bridge.start();
+    dialAndFail();
+    assert.ok(scheduled.length > before, "restart should schedule a fresh reconnect");
+    assert.strictEqual(scheduled.at(-1).delay, 2000, "stop() must reset backoff to the base delay (not 16s)");
+
+    bridge.stop();
+  } finally {
+    global.setTimeout = realSetTimeout;
+  }
 });
