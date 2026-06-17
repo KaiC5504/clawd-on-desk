@@ -30,6 +30,7 @@ function runDoctorChecks(options = {}) {
       server: options.server,
       fs: options.fs,
       platform: options.platform,
+      env: options.env,
       descriptors: options.descriptors,
       validateCommand: options.validateCommand,
     }),

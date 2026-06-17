@@ -53,6 +53,7 @@ function baseDescriptor(overrides = {}) {
 function runOne(descriptor, options = {}) {
   return checkAgentIntegrations({
     fs,
+    env: options.env || {},
     prefs: options.prefs || {},
     descriptors: [descriptor],
     server: options.server || null,
@@ -1009,6 +1010,64 @@ describe("checkAgentIntegrations", () => {
     });
     assert.strictEqual(detail.status, "ok");
     assert.strictEqual(detail.configPath, descriptor.altConfigPath);
+  });
+
+  it("honors KIMI_CODE_HOME when resolving the kimi-code config", () => {
+    const root = makeTempDir();
+    const legacyParent = path.join(root, ".kimi");          // intentionally absent
+    const customParent = path.join(root, "custom-kimi-home");
+    const descriptor = baseDescriptor({
+      agentId: "kimi-cli",
+      marker: "kimi-hook.js",
+      configMode: "toml-text",
+      parentDir: legacyParent,
+      configPath: path.join(legacyParent, "config.toml"),
+      // Static defaults point at ~/.kimi-code, which does NOT exist in the sandbox;
+      // the Doctor must instead resolve $KIMI_CODE_HOME like the detector does.
+      altParentDir: path.join(root, ".kimi-code"),
+      altConfigPath: path.join(root, ".kimi-code", "config.toml"),
+    });
+    fs.mkdirSync(customParent, { recursive: true });
+    fs.writeFileSync(
+      path.join(customParent, "config.toml"),
+      '[[hooks]]\nevent = "Stop"\ncommand = \'"node" "/x/kimi-hook.js"\'\n',
+      "utf8"
+    );
+
+    const detail = runOne(descriptor, {
+      env: { KIMI_CODE_HOME: customParent },
+      validateCommand: () => ({ ok: true, nodeBin: "/node", scriptPath: "/x/kimi-hook.js" }),
+    });
+    assert.strictEqual(detail.status, "ok");
+    assert.strictEqual(detail.configPath, path.join(customParent, "config.toml"));
+  });
+
+  it("reports not-connected when KIMI_CODE_HOME home exists but lacks config", () => {
+    const root = makeTempDir();
+    const legacyParent = path.join(root, ".kimi");          // absent
+    const customParent = path.join(root, "custom-kimi-home"); // exists, no config.toml
+    const descriptor = baseDescriptor({
+      agentId: "kimi-cli",
+      marker: "kimi-hook.js",
+      configMode: "toml-text",
+      parentDir: legacyParent,
+      configPath: path.join(legacyParent, "config.toml"),
+      // Static ~/.kimi-code default is absent; only the resolved $KIMI_CODE_HOME
+      // home exists. Without env resolution this reads not-installed; the fix must
+      // surface the maintainer's exact "installed but not connected" symptom.
+      altParentDir: path.join(root, ".kimi-code"),
+      altConfigPath: path.join(root, ".kimi-code", "config.toml"),
+    });
+    fs.mkdirSync(customParent, { recursive: true });
+
+    const detail = runOne(descriptor, {
+      env: { KIMI_CODE_HOME: customParent },
+      validateCommand: () => ({ ok: true, nodeBin: "/node", scriptPath: "/x/kimi-hook.js" }),
+    });
+    assert.strictEqual(detail.status, "not-connected");
+    // The "missing" message must name the custom home, not the legacy ~/.kimi path.
+    assert.strictEqual(detail.configPath, path.join(customParent, "config.toml"));
+    assert.ok(detail.detail.includes(customParent));
   });
 
   it("turns Codex ok into warning when hooks=false", () => {

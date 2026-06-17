@@ -18,7 +18,7 @@ const {
   hasUserPermissionHookInSettingsJson,
   isCopilotPermissionRegistrable,
 } = require("../../hooks/copilot-install");
-const { findKimiHookCommands } = require("../../hooks/kimi-install");
+const { findKimiHookCommands, resolveKimiCodeParentDir } = require("../../hooks/kimi-install");
 const { parseTomlSections: parseCodewhaleTomlSections } = require("../../hooks/codewhale-install");
 const { getAgentDescriptors } = require("./agent-descriptors");
 const { commandContainsFragment, validateHookCommand } = require("./agent-node-bin-parser");
@@ -876,12 +876,20 @@ function checkTomlTextMode(descriptor, options) {
     .filter((p) => fileExists(options.fs, p));
 
   if (candidates.length === 0) {
+    // Name the config under whichever Kimi home actually exists, so a
+    // $KIMI_CODE_HOME user isn't pointed at the legacy ~/.kimi path (#504).
+    const expectedPath =
+      descriptor.altConfigPath
+      && dirExists(options.fs, descriptor.altParentDir)
+      && !dirExists(options.fs, descriptor.parentDir)
+        ? descriptor.altConfigPath
+        : descriptor.configPath;
     return makeDetail(descriptor, "not-connected", {
       level: "warning",
       parentDirExists: true,
       configFileExists: false,
-      configPath: descriptor.configPath,
-      detail: `${descriptor.configPath} missing`,
+      configPath: expectedPath,
+      detail: `${expectedPath} missing`,
     });
   }
 
@@ -1656,7 +1664,23 @@ function checkPiExtensionMode(descriptor, options) {
   });
 }
 
+// The frozen kimi-cli descriptor carries the static ~/.kimi-code defaults, which
+// ignore KIMI_CODE_HOME. When the override is set, re-resolve the kimi-code paths
+// through resolveKimiCodeParentDir — the canonical resolver the detector uses — so
+// a custom-home install isn't misreported as not-installed/not-connected (#504
+// review). When it's unset we return the descriptor untouched rather than call the
+// helper: its os.homedir() fallback would override descriptor paths a caller
+// (e.g. a test sandbox) deliberately set.
+function resolveKimiDescriptor(descriptor, env) {
+  if (descriptor.agentId !== "kimi-cli") return descriptor;
+  const raw = env && typeof env.KIMI_CODE_HOME === "string" ? env.KIMI_CODE_HOME.trim() : "";
+  if (!raw) return descriptor;
+  const altParentDir = resolveKimiCodeParentDir(env);
+  return { ...descriptor, altParentDir, altConfigPath: path.join(altParentDir, "config.toml") };
+}
+
 function checkAgent(descriptor, options) {
+  descriptor = resolveKimiDescriptor(descriptor, options.env);
   const prefs = options.prefs || {};
   if (!isAgentIntegrationInstalled(prefs, descriptor.agentId)) {
     return makeDetail(descriptor, "not-managed", {
@@ -1757,6 +1781,7 @@ function checkAgentIntegrations(options = {}) {
   const detectorOptions = {
     fs: options.fs || fs,
     platform: options.platform || process.platform,
+    env: options.env || process.env,
     prefs: options.prefs || {},
     server: options.server || null,
     validateCommand: options.validateCommand || validateHookCommand,
