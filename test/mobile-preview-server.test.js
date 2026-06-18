@@ -134,9 +134,9 @@ describe("Mobile Preview Server", () => {
     try { fs.rmSync(tmpTokenDir, { recursive: true }); } catch {}
   });
 
-  it("protocol version is v1", () => {
-    assert.strictEqual(PROTOCOL_VERSION, "v1");
-    assert.strictEqual(server.PROTOCOL_VERSION, "v1");
+  it("protocol version is v2", () => {
+    assert.strictEqual(PROTOCOL_VERSION, "v2");
+    assert.strictEqual(server.PROTOCOL_VERSION, "v2");
   });
 
   it("starts and listens on a port", () => {
@@ -190,7 +190,7 @@ describe("Mobile Preview Server", () => {
     await waitForOpen(client.ws);
     const snapshot = await client.waitFor("snapshot");
 
-    assert.strictEqual(snapshot.version, "v1");
+    assert.strictEqual(snapshot.version, "v2");
     assert.ok(snapshot.timestamp > 0);
     assert.ok(snapshot.sessions.s1);
     assert.strictEqual(snapshot.sessions.s1.state, "working");
@@ -240,7 +240,7 @@ describe("Mobile Preview Server", () => {
     server.onSnapshot();
 
     const stateMsg = await client.waitFor("state");
-    assert.strictEqual(stateMsg.version, "v1");
+    assert.strictEqual(stateMsg.version, "v2");
     assert.strictEqual(stateMsg.sessionId, "s1");
     assert.strictEqual(stateMsg.data.state, "thinking");
 
@@ -257,7 +257,7 @@ describe("Mobile Preview Server", () => {
     server.onSnapshot();
 
     const delMsg = await client.waitFor("session_deleted");
-    assert.strictEqual(delMsg.version, "v1");
+    assert.strictEqual(delMsg.version, "v2");
     assert.strictEqual(delMsg.sessionId, "s1");
 
     client.close();
@@ -898,5 +898,286 @@ describe("Rotate-on-use", () => {
     client2.close();
     server.cleanup();
     await new Promise((r) => setTimeout(r, 200));
+  });
+});
+
+// ── v2: approvals, pairing, detail, push, public endpoints ──
+
+function connectWithCredential(port, { token, deviceId, secret } = {}) {
+  const qs = new URLSearchParams();
+  if (token) qs.set("token", token);
+  if (deviceId) qs.set("deviceId", deviceId);
+  if (secret) qs.set("secret", secret);
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?${qs.toString()}`);
+  const messages = [];
+  const waiters = [];
+  ws.on("message", (data) => {
+    try {
+      const msg = JSON.parse(data);
+      messages.push(msg);
+      for (let i = waiters.length - 1; i >= 0; i--) {
+        if (waiters[i].type === msg.type) {
+          const w = waiters.splice(i, 1)[0];
+          w.resolve(msg);
+        }
+      }
+    } catch {}
+  });
+  return {
+    ws,
+    waitFor(type, timeoutMs = 5000) {
+      const existing = messages.find((m) => m.type === type);
+      if (existing) return Promise.resolve(existing);
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`Timeout waiting for ${type}`)), timeoutMs);
+        waiters.push({ type, resolve: (msg) => { clearTimeout(timer); resolve(msg); } });
+      });
+    },
+    send(obj) { ws.send(JSON.stringify(obj)); },
+    close() { ws.close(); },
+  };
+}
+
+// Pair a fresh token connection into a durable device credential. Returns the
+// live client (whose meta now carries deviceId + approvalsAllowed) plus the
+// issued { deviceId, secret } so callers can also reconnect with the secret.
+async function pairDevice(server, port, token, deviceId) {
+  const client = connectWithCredential(port, { token });
+  await waitForOpen(client.ws);
+  await client.waitFor("snapshot");
+  client.send({ type: "client_hello", protocol: "v2" });
+  client.send({ type: "pair", deviceId, label: "Test iPhone" });
+  const paired = await client.waitFor("paired");
+  return { client, deviceId: paired.deviceId, secret: paired.secret };
+}
+
+describe("Mobile Preview v2 — approvals + pairing", () => {
+  let server;
+  let port;
+  let token;
+  let tmpDir;
+  let settings;
+  const sessions = new Map();
+
+  function ctxPaths(extra = {}) {
+    return {
+      sessions,
+      getSettingsSnapshot: () => settings,
+      tokenPath: path.join(tmpDir, "mobile-token.json"),
+      tlsDir: path.join(tmpDir, "tls"),
+      vapidPath: path.join(tmpDir, "vapid.json"),
+      subsPath: path.join(tmpDir, "push-subs.json"),
+      devicesPath: path.join(tmpDir, "mobile-devices.json"),
+      ...extra,
+    };
+  }
+
+  before(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-v2-"));
+  });
+
+  after(() => {
+    if (server) { try { server.cleanup(); } catch {} server = null; }
+    sessions.clear();
+    try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+  });
+
+  async function freshServer(extra = {}) {
+    if (server) { server.cleanup(); await new Promise((r) => setTimeout(r, 100)); }
+    sessions.clear();
+    settings = { mobileApprovalsEnabled: true };
+    server = initMobilePreviewServer(ctxPaths(extra));
+    port = await server.start();
+    token = server.getToken();
+    return server;
+  }
+
+  it("approval_decision is DROPPED when mobileApprovalsEnabled is false", async () => {
+    await freshServer();
+    const transport = server.getApprovalTransport();
+    let fired = null;
+    transport.onDecision((handle, decision) => { fired = { handle, decision }; });
+
+    const { client } = await pairDevice(server, port, token, "device-disabled-01");
+
+    // Register a pending approval so the handle is known to the server.
+    transport.pushApproval("h-disabled", { title: "rm -rf", detail: "scary" }, "s-x");
+
+    // Flip the global toggle OFF after pairing — the write gate must reject.
+    settings.mobileApprovalsEnabled = false;
+
+    client.send({ type: "approval_decision", handle: "h-disabled", decision: "allow" });
+    await new Promise((r) => setTimeout(r, 300));
+
+    assert.strictEqual(fired, null, "decision must be dropped when approvals are disabled");
+    client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("approval_decision is DROPPED for a non-paired (token-only) connection", async () => {
+    await freshServer();
+    const transport = server.getApprovalTransport();
+    let fired = null;
+    transport.onDecision((handle, decision) => { fired = { handle, decision }; });
+    transport.pushApproval("h-token", { title: "rm -rf", detail: "scary" }, "s-y");
+
+    // Plain token connection — never pairs, so meta.deviceId stays null → canWrite() false.
+    const client = connectWithCredential(port, { token });
+    await waitForOpen(client.ws);
+    await client.waitFor("snapshot");
+    client.send({ type: "client_hello", protocol: "v2" });
+    client.send({ type: "approval_decision", handle: "h-token", decision: "allow" });
+    await new Promise((r) => setTimeout(r, 300));
+
+    assert.strictEqual(fired, null, "token-only connection must not drive decisions");
+    client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("a paired+allowed v2 device CAN drive a decision to the decisionListener", async () => {
+    await freshServer();
+    const transport = server.getApprovalTransport();
+    const decisions = [];
+    transport.onDecision((handle, decision) => { decisions.push({ handle, decision }); });
+    transport.pushApproval("h-ok", { title: "git push", detail: "to origin" }, "s-z");
+
+    const { client } = await pairDevice(server, port, token, "device-allowed-01");
+    client.send({ type: "approval_decision", handle: "h-ok", decision: "allow" });
+
+    // Poll until the listener fires (deterministic, bounded).
+    const start = Date.now();
+    while (decisions.length === 0 && Date.now() - start < 2000) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+
+    assert.strictEqual(decisions.length, 1, "paired+allowed device must reach the listener");
+    assert.strictEqual(decisions[0].handle, "h-ok");
+    assert.strictEqual(decisions[0].decision, "allow");
+    client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("request_detail returns canFocus/model/contextUsage/lastOutput when present", async () => {
+    await freshServer({ focusSession: () => {} });
+    sessions.set("s-detail", {
+      state: "working",
+      agentId: "claude-code",
+      cwd: "/home/user/myproj",
+      sessionTitle: "Detail Session",
+      updatedAt: Date.now(),
+      recentEvents: [{ kind: "tool", text: "ran ls" }],
+      model: "claude-opus-4-8",
+      contextUsage: { used: 1200, limit: 200000, percent: 0.6 },
+      assistantLastOutput: "Here is the summary of what I did.",
+    });
+    server.onSnapshot();
+
+    const client = connectWithCredential(port, { token });
+    await waitForOpen(client.ws);
+    await client.waitFor("snapshot");
+    client.send({ type: "request_detail", sessionId: "s-detail" });
+    const detail = await client.waitFor("detail");
+
+    assert.strictEqual(detail.sessionId, "s-detail");
+    assert.ok(detail.data, "detail payload present");
+    assert.strictEqual(detail.data.canFocus, true);
+    assert.strictEqual(detail.data.model, "claude-opus-4-8");
+    assert.strictEqual(detail.data.basename, "myproj");
+    assert.deepStrictEqual(detail.data.contextUsage, { used: 1200, limit: 200000, percent: 0.6 });
+    assert.strictEqual(detail.data.lastOutput, "Here is the summary of what I did.");
+
+    client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("subscribe_push requires a paired device (no deviceId -> ignored)", async () => {
+    await freshServer();
+    const before = server.getPushStatus().subCount;
+
+    // Token-only connection: meta.deviceId is null, so subscribe_push must be a no-op.
+    const client = connectWithCredential(port, { token });
+    await waitForOpen(client.ws);
+    await client.waitFor("snapshot");
+    client.send({ type: "client_hello", protocol: "v2" });
+    client.send({
+      type: "subscribe_push",
+      subscription: { endpoint: "https://push.example/fake", keys: { p256dh: "fake", auth: "fake" } },
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    assert.strictEqual(server.getPushStatus().subCount, before,
+      "subscribe_push without a paired device must not register a subscription");
+    client.close();
+
+    // Paired device: the same subscribe_push DOES register.
+    const { client: paired, deviceId } = await pairDevice(server, port, token, "device-push-01");
+    paired.send({
+      type: "subscribe_push",
+      subscription: { endpoint: "https://push.example/real-fake", keys: { p256dh: "fake", auth: "fake" } },
+    });
+    const start = Date.now();
+    while (server.getPushStatus().subCount === before && Date.now() - start < 2000) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.strictEqual(server.getPushStatus().subCount, before + 1,
+      "paired device subscribe_push registers exactly one subscription");
+    assert.ok(server.listDevices().some((d) => d.deviceId === deviceId));
+    paired.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+});
+
+describe("Mobile Preview v2 — public HTTP endpoints", () => {
+  let server;
+  let port;
+  let tmpDir;
+  const sessions = new Map();
+
+  before(async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-v2-http-"));
+    server = initMobilePreviewServer({
+      sessions,
+      getSettingsSnapshot: () => ({ mobileApprovalsEnabled: true }),
+      tokenPath: path.join(tmpDir, "mobile-token.json"),
+      tlsDir: path.join(tmpDir, "tls"),
+      vapidPath: path.join(tmpDir, "vapid.json"),
+      subsPath: path.join(tmpDir, "push-subs.json"),
+      devicesPath: path.join(tmpDir, "mobile-devices.json"),
+    });
+    port = await server.start();
+  });
+
+  after(() => {
+    server.cleanup();
+    sessions.clear();
+    try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+  });
+
+  it("/api/connection-info returns the documented shape", async () => {
+    const res = await httpGet(port, "/api/connection-info");
+    assert.strictEqual(res.status, 200);
+    assert.ok(res.headers["content-type"].includes("application/json"));
+    const info = JSON.parse(res.body);
+    assert.strictEqual(info.status, "ok");
+    assert.strictEqual(info.port, port);
+    assert.ok("httpsPort" in info);
+    assert.strictEqual(info.httpsReady, false);
+    assert.strictEqual(typeof info.lanIp, "string");
+    assert.strictEqual(info.host, "clawd.local");
+    assert.strictEqual(info.mode, "lan");
+    assert.strictEqual(info.approvalsEnabled, true);
+    assert.ok("pushPublicKey" in info);
+    // vapid was generated (vapidPath injected) → public key is exposed here.
+    assert.strictEqual(typeof info.pushPublicKey, "string");
+    assert.ok(!("token" in info));
+  });
+
+  it("/api/push/vapid-public-key returns { publicKey }", async () => {
+    const res = await httpGet(port, "/api/push/vapid-public-key");
+    assert.strictEqual(res.status, 200);
+    assert.ok(res.headers["content-type"].includes("application/json"));
+    const body = JSON.parse(res.body);
+    assert.ok("publicKey" in body);
+    assert.strictEqual(typeof body.publicKey, "string");
+    assert.ok(body.publicKey.length > 0);
   });
 });

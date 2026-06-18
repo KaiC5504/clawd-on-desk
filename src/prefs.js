@@ -185,6 +185,21 @@ const SCHEMA = {
   },
   lowPowerIdleMode: { type: "boolean", default: false },
   mobilePreviewEnabled: { type: "boolean", default: false },
+  // Mobile interactive-approval surface (iPhone PWA). Off by default: a paired
+  // phone can monitor, but decision/focus messages are rejected until opted in.
+  mobileApprovalsEnabled: { type: "boolean", default: false },
+  // HTTPS listener (self-signed CA) for iOS Web Push + secure-context PWA.
+  mobileHttpsEnabled: { type: "boolean", default: false },
+  // Remembers that the user confirmed the iPhone trusts the CA (drives the
+  // setup wizard's "trusted" status pill; purely a UI hint, no security weight).
+  mobileCertTrustedHint: { type: "boolean", default: false },
+  // "lan" = self-signed CA on the home network (default); "tailscale" = reach
+  // the desktop over the tailnet with a real cert (no CA ritual).
+  mobileConnectionMode: {
+    type: "string",
+    default: "lan",
+    validate: (v) => v === "lan" || v === "tailscale",
+  },
   // When true, prevent the OS from sleeping while any agent task is in
   // progress (working/thinking/etc.); allow sleep again once tasks finish.
   keepAwakeWhileWorking: { type: "boolean", default: false },

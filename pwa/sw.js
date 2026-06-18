@@ -1,4 +1,4 @@
-const CACHE_NAME = "clawd-mobile-v5";
+const CACHE_NAME = "clawd-mobile-v6";
 const STATIC_ASSETS = [
   "/mobile/",
   "/mobile/index.html",
@@ -11,7 +11,8 @@ const STATIC_ASSETS = [
 self.addEventListener("install", (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then((cache) => cache.addAll(STATIC_ASSETS))
+      // Bypass the HTTP cache so a new SW version always precaches fresh assets.
+      .then((cache) => cache.addAll(STATIC_ASSETS.map((u) => new Request(u, { cache: "reload" }))))
       .then(() => self.skipWaiting())
   );
 });
@@ -46,15 +47,36 @@ self.addEventListener("fetch", (event) => {
   );
 });
 
-// 通知点击：聚焦到已有窗口
+// 推送：审批请求 → 系统通知
+self.addEventListener("push", (event) => {
+  let data = {};
+  try { data = event.data ? event.data.json() : {}; } catch {}
+  const title = data.title || "需要审批 / Approval needed";
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body: data.body || "",
+      tag: data.tag || (data.handle ? "approval-" + data.handle : "clawd-approval"),
+      icon: "/mobile/icons/icon-256.png",
+      badge: "/mobile/icons/icon-256.png",
+      data: { handle: data.handle || null, sessionId: data.sessionId || null },
+    })
+  );
+});
+
+// 通知点击：聚焦到已有窗口并深链到对应审批
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
+  const handle = event.notification.data && event.notification.data.handle;
+  const target = "/mobile/" + (handle ? "#approval=" + encodeURIComponent(handle) : "");
   event.waitUntil(
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
       for (const client of clients) {
-        if ("focus" in client) return client.focus();
+        if ("focus" in client) {
+          if (handle) { try { client.postMessage({ type: "approval-focus", handle: handle }); } catch {} }
+          return client.focus();
+        }
       }
-      return self.clients.openWindow("/mobile/");
+      return self.clients.openWindow(target);
     })
   );
 });

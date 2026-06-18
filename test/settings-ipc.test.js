@@ -726,3 +726,217 @@ test("settings IPC exposes read-only agent installation detection", async () => 
 
   runtime.dispose();
 });
+
+// ── v2 interactive-mobile settings handlers ──
+
+const FAKE_TOKEN = "00000000000000000000000000000000";
+
+function makeFakeLanServer(overrides = {}) {
+  const calls = [];
+  const server = {
+    getPort: () => (overrides.port === undefined ? 23334 : overrides.port),
+    getToken: () => (overrides.token === undefined ? FAKE_TOKEN : overrides.token),
+    getHttpsInfo: () => {
+      calls.push(["getHttpsInfo"]);
+      return overrides.httpsInfo === undefined
+        ? { httpsReady: false, host: "clawd.local", lanIp: "192.168.1.50" }
+        : overrides.httpsInfo;
+    },
+    getPushStatus: () => {
+      calls.push(["getPushStatus"]);
+      return overrides.pushStatus === undefined
+        ? { enabled: true, subscriptions: 2 }
+        : overrides.pushStatus;
+    },
+    listDevices: () => {
+      calls.push(["listDevices"]);
+      return overrides.devices === undefined
+        ? [{ deviceId: "dev-1", name: "iPhone", approvalsAllowed: true }]
+        : overrides.devices;
+    },
+    revokeDevice: (deviceId) => {
+      calls.push(["revokeDevice", deviceId]);
+      return overrides.revokeResult === undefined ? true : overrides.revokeResult;
+    },
+    setDeviceApprovalsAllowed: (deviceId, allowed) => {
+      calls.push(["setDeviceApprovalsAllowed", deviceId, allowed]);
+      return overrides.setApprovalsResult === undefined ? true : overrides.setApprovalsResult;
+    },
+    getLocalIP: () => (overrides.localIp === undefined ? "192.168.1.50" : overrides.localIp),
+  };
+  if (overrides.omitGetLocalIP) delete server.getLocalIP;
+  return { server, calls };
+}
+
+function decodeQrPayload(dataUrl) {
+  assert.match(dataUrl, /^data:image\/png;base64,/, "qr must be a PNG data URL");
+}
+
+test("mobile-https-info passes through getHttpsInfo result", async () => {
+  const { server, calls } = makeFakeLanServer({
+    httpsInfo: { httpsReady: true, host: "clawd.local", httpsPort: 23335, lanIp: "10.0.0.5" },
+  });
+  const { ipcMain, runtime } = createHarness({ getLanWsServer: () => server });
+
+  assert.deepStrictEqual(await ipcMain.invoke("settings:mobile-https-info"), {
+    status: "ok",
+    httpsReady: true,
+    host: "clawd.local",
+    httpsPort: 23335,
+    lanIp: "10.0.0.5",
+  });
+  assert.deepStrictEqual(calls, [["getHttpsInfo"]]);
+  runtime.dispose();
+});
+
+test("mobile-push-status passes through getPushStatus result", async () => {
+  const { server, calls } = makeFakeLanServer({ pushStatus: { enabled: false, subscriptions: 0 } });
+  const { ipcMain, runtime } = createHarness({ getLanWsServer: () => server });
+
+  assert.deepStrictEqual(await ipcMain.invoke("settings:mobile-push-status"), {
+    status: "ok",
+    enabled: false,
+    subscriptions: 0,
+  });
+  assert.deepStrictEqual(calls, [["getPushStatus"]]);
+  runtime.dispose();
+});
+
+test("list-mobile-devices passes through listDevices result", async () => {
+  const devices = [
+    { deviceId: "dev-1", name: "iPhone", approvalsAllowed: true },
+    { deviceId: "dev-2", name: "iPad", approvalsAllowed: false },
+  ];
+  const { server, calls } = makeFakeLanServer({ devices });
+  const { ipcMain, runtime } = createHarness({ getLanWsServer: () => server });
+
+  assert.deepStrictEqual(await ipcMain.invoke("settings:list-mobile-devices"), {
+    status: "ok",
+    devices,
+  });
+  assert.deepStrictEqual(calls, [["listDevices"]]);
+  runtime.dispose();
+});
+
+test("revoke-mobile-device forwards deviceId and reports removal", async () => {
+  const { server, calls } = makeFakeLanServer();
+  const { ipcMain, runtime } = createHarness({ getLanWsServer: () => server });
+
+  assert.deepStrictEqual(await ipcMain.invoke("settings:revoke-mobile-device", "dev-1"), {
+    status: "ok",
+    removed: true,
+  });
+  assert.deepStrictEqual(calls, [["revokeDevice", "dev-1"]]);
+
+  assert.deepStrictEqual(await ipcMain.invoke("settings:revoke-mobile-device", ""), {
+    status: "error",
+    message: "deviceId must be a non-empty string",
+  });
+  runtime.dispose();
+});
+
+test("set-mobile-device-approvals forwards deviceId + coerced allowed flag", async () => {
+  const { server, calls } = makeFakeLanServer();
+  const { ipcMain, runtime } = createHarness({ getLanWsServer: () => server });
+
+  assert.deepStrictEqual(
+    await ipcMain.invoke("settings:set-mobile-device-approvals", { deviceId: "dev-2", allowed: true }),
+    { status: "ok", updated: true }
+  );
+  assert.deepStrictEqual(calls, [["setDeviceApprovalsAllowed", "dev-2", true]]);
+
+  assert.deepStrictEqual(
+    await ipcMain.invoke("settings:set-mobile-device-approvals", { allowed: true }),
+    { status: "error", message: "deviceId must be a non-empty string" }
+  );
+  assert.deepStrictEqual(
+    await ipcMain.invoke("settings:set-mobile-device-approvals", null),
+    { status: "error", message: "payload must be { deviceId, allowed }" }
+  );
+  runtime.dispose();
+});
+
+test("v2 mobile handlers return a safe not-available object when the LAN bridge is null", async () => {
+  const { ipcMain, runtime } = createHarness({ getLanWsServer: () => null });
+  const notAvailable = { status: "error", message: "LAN bridge not available" };
+
+  assert.deepStrictEqual(await ipcMain.invoke("settings:mobile-https-info"), notAvailable);
+  assert.deepStrictEqual(await ipcMain.invoke("settings:mobile-push-status"), notAvailable);
+  assert.deepStrictEqual(await ipcMain.invoke("settings:list-mobile-devices"), notAvailable);
+  assert.deepStrictEqual(await ipcMain.invoke("settings:revoke-mobile-device", "dev-1"), notAvailable);
+  assert.deepStrictEqual(
+    await ipcMain.invoke("settings:set-mobile-device-approvals", { deviceId: "dev-1", allowed: true }),
+    notAvailable
+  );
+  assert.deepStrictEqual(await ipcMain.invoke("settings:mobile-pairing-qr"), notAvailable);
+  runtime.dispose();
+});
+
+test("mobile-pairing-qr generates real http QR codes when HTTPS is not ready", async () => {
+  const { server } = makeFakeLanServer({
+    httpsInfo: { httpsReady: false, host: "clawd.local", lanIp: "192.168.1.50" },
+    localIp: "192.168.1.50",
+  });
+  const { ipcMain, runtime } = createHarness({ getLanWsServer: () => server });
+
+  const result = await ipcMain.invoke("settings:mobile-pairing-qr");
+
+  assert.strictEqual(result.status, "ok");
+  assert.strictEqual(result.httpsReady, false);
+
+  for (const variant of [result.host, result.ip]) {
+    decodeQrPayload(variant.qr);
+    const url = new URL(variant.url);
+    assert.strictEqual(url.protocol, "http:");
+    // Without HTTPS the primary (host) variant also falls back to the raw IP.
+    assert.strictEqual(url.hostname, "192.168.1.50");
+    assert.strictEqual(url.port, "23334");
+    assert.strictEqual(url.searchParams.get("port"), "23334");
+    assert.strictEqual(url.searchParams.get("token"), FAKE_TOKEN);
+    assert.strictEqual(url.searchParams.get("host"), "192.168.1.50");
+    assert.strictEqual(url.searchParams.get("secure"), null);
+  }
+  runtime.dispose();
+});
+
+test("mobile-pairing-qr uses clawd.local + secure=1 + https port when HTTPS is ready", async () => {
+  const { server } = makeFakeLanServer({
+    httpsInfo: { httpsReady: true, host: "clawd.local", httpsPort: 23335, lanIp: "192.168.1.50" },
+    localIp: "192.168.1.50",
+  });
+  const { ipcMain, runtime } = createHarness({ getLanWsServer: () => server });
+
+  const result = await ipcMain.invoke("settings:mobile-pairing-qr");
+
+  assert.strictEqual(result.status, "ok");
+  assert.strictEqual(result.httpsReady, true);
+
+  decodeQrPayload(result.host.qr);
+  const hostUrl = new URL(result.host.url);
+  assert.strictEqual(hostUrl.protocol, "https:");
+  assert.strictEqual(hostUrl.hostname, "clawd.local");
+  assert.strictEqual(hostUrl.port, "23335");
+  assert.strictEqual(hostUrl.searchParams.get("port"), "23335");
+  assert.strictEqual(hostUrl.searchParams.get("token"), FAKE_TOKEN);
+  assert.strictEqual(hostUrl.searchParams.get("host"), "clawd.local");
+  assert.strictEqual(hostUrl.searchParams.get("secure"), "1");
+
+  decodeQrPayload(result.ip.qr);
+  const ipUrl = new URL(result.ip.url);
+  assert.strictEqual(ipUrl.protocol, "https:");
+  assert.strictEqual(ipUrl.hostname, "192.168.1.50");
+  assert.strictEqual(ipUrl.port, "23335");
+  assert.strictEqual(ipUrl.searchParams.get("secure"), "1");
+  runtime.dispose();
+});
+
+test("mobile-pairing-qr reports starting until the LAN bridge has a port and token", async () => {
+  const { server } = makeFakeLanServer({ port: null });
+  const { ipcMain, runtime } = createHarness({ getLanWsServer: () => server });
+
+  assert.deepStrictEqual(await ipcMain.invoke("settings:mobile-pairing-qr"), {
+    status: "starting",
+    message: "LAN bridge is starting",
+  });
+  runtime.dispose();
+});

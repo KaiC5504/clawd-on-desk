@@ -91,6 +91,7 @@ body { display: flex; flex-direction: column; height: 100%; }
 
 /* === Session Card === */
 .session-card { background: var(--card); border: 0.5px solid var(--card-border); border-radius: var(--radius); padding: 12px 14px 10px; }
+.card-tap { cursor: pointer; }
 .card-header { display: flex; align-items: center; justify-content: space-between; }
 .card-agent { display: flex; align-items: center; gap: 5px; }
 .agent-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); flex-shrink: 0; }
@@ -129,6 +130,51 @@ body { display: flex; flex-direction: column; height: 100%; }
 .event-row:last-child .event-line { display: none; }
 .event-label { font-size: 12px; color: var(--faint); flex: 1; }
 .event-time { font-size: 11px; color: var(--subtle); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+
+/* === Approvals === */
+#approval-list { padding: 0 14px; display: flex; flex-direction: column; gap: 8px; }
+#approval-list:not(:empty) { padding-bottom: 12px; }
+.approval-card { background: var(--card); border: 0.5px solid var(--orange-border); border-radius: var(--radius); padding: 12px 14px; }
+.approval-card.resolving { opacity: 0.5; pointer-events: none; }
+.approval-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.approval-head svg { width: 14px; height: 14px; color: var(--accent); flex-shrink: 0; }
+.approval-kind { font-size: 10px; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: 0.4px; }
+.approval-title { font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+.approval-detail { font-size: 12px; color: var(--muted); line-height: 16px; white-space: pre-wrap; word-break: break-word; max-height: 160px; overflow-y: auto; }
+.approval-outcome { font-size: 12px; color: var(--green); padding-top: 6px; }
+.approval-actions { display: flex; gap: 8px; margin-top: 10px; }
+.approval-btn { flex: 1; padding: 9px; border: none; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; transition: transform 0.1s, opacity 0.2s; }
+.approval-btn:active { transform: scale(0.97); }
+.approval-btn.allow { background: var(--green-dim); color: var(--green); border: 0.5px solid var(--green-border); }
+.approval-btn.deny { background: rgba(239, 68, 68, 0.12); color: var(--red); border: 0.5px solid rgba(239, 68, 68, 0.25); }
+.approval-suggestions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.approval-chip { padding: 6px 10px; border-radius: var(--radius-sm); font-size: 12px; font-weight: 500; cursor: pointer; background: var(--badge-bg); border: 0.5px solid var(--badge-border); color: var(--text); transition: transform 0.1s; }
+.approval-chip:active { transform: scale(0.96); }
+.approval-pair-hint { font-size: 12px; color: var(--faint); margin-top: 8px; }
+
+/* === Session Detail Overlay === */
+#detail-overlay { position: fixed; inset: 0; z-index: 1500; background: var(--bg); display: flex; flex-direction: column; padding-top: var(--safe-top); padding-bottom: var(--safe-bottom); animation: toast-in 0.2s ease-out; }
+.detail-header { display: flex; align-items: center; gap: 10px; padding: 14px 16px; flex-shrink: 0; }
+.detail-back { background: none; border: none; color: var(--accent); font-size: 14px; cursor: pointer; display: flex; align-items: center; gap: 4px; padding: 0; }
+.detail-back svg { width: 18px; height: 18px; }
+.detail-title { font-size: 16px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.detail-body { flex: 1; min-height: 0; overflow-y: auto; padding: 0 16px 16px; }
+.detail-block { background: var(--card); border: 0.5px solid var(--card-border); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 10px; }
+.detail-block-label { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 8px; }
+.detail-model { font-size: 13px; color: var(--text); font-family: ui-monospace, Menlo, Consolas, monospace; }
+.ctx-bar { height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; margin: 8px 0 6px; }
+.ctx-bar-fill { height: 100%; background: var(--accent); border-radius: 3px; transition: width 0.3s; }
+.ctx-meta { font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.detail-output { font-size: 12px; color: var(--subtle); line-height: 17px; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, Menlo, Consolas, monospace; }
+.detail-focus-btn { width: 100%; padding: 11px; border: none; border-radius: 8px; background: var(--accent); color: #fff; font-size: 14px; font-weight: 600; cursor: pointer; transition: transform 0.1s; margin-top: 2px; }
+.detail-focus-btn:active { transform: scale(0.98); }
+
+/* === Settings: notifications / pairing toggle === */
+.settings-action-btn { width: 100%; padding: 11px; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; transition: transform 0.1s, opacity 0.2s; }
+.settings-action-btn:active { transform: scale(0.98); }
+.settings-action-btn.on { background: var(--accent); color: #fff; border: none; }
+.settings-action-btn.off { background: var(--bg); color: var(--text); border: 1px solid var(--card-border); }
+.settings-hint { font-size: 12px; color: var(--faint); margin-top: 8px; line-height: 16px; }
 
 /* === Bottom Navigation === */
 #bottom-nav {

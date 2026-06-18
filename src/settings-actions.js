@@ -287,6 +287,10 @@ const updateRegistry = {
   freeRoam: requireBoolean("freeRoam"),
   keepSizeAcrossDisplays: requireBoolean("keepSizeAcrossDisplays"),
   mobilePreviewEnabled: requireBoolean("mobilePreviewEnabled"),
+  mobileApprovalsEnabled: requireBoolean("mobileApprovalsEnabled"),
+  mobileHttpsEnabled: requireBoolean("mobileHttpsEnabled"),
+  mobileCertTrustedHint: requireBoolean("mobileCertTrustedHint"),
+  mobileConnectionMode: requireEnum("mobileConnectionMode", ["lan", "tailscale"]),
 
   // ── System-backed prefs (object-form: validate + effect pre-commit gate) ──
   autoStartWithClaude,

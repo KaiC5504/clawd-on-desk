@@ -1,30 +1,51 @@
-// src/network/mobile-preview-server.js — LAN WebSocket bridge for PWA mobile clients
-// Protocol v1 — serves static PWA files + WebSocket on 0.0.0.0 for LAN access.
-// M1: read-only snapshot/state push. No write or approval operations.
-// Token rotation: 24h auto-rotation with 5-minute grace window.
+// src/network/mobile-preview-server.js — LAN bridge for PWA mobile clients
+// Protocol v2 — serves static PWA files + WebSocket over plain HTTP (LAN monitor)
+// and, when enabled, over HTTPS (self-signed CA) so iOS gets a secure context for
+// Web Push + interactive approval. v1 read-only monitoring stays fully supported;
+// v2 adds an opt-in approval channel (allow/deny/suggestion), per-device pairing,
+// push, and a richer session-detail payload.
+// Token rotation: 24h auto-rotation with 5-minute grace window (unchanged).
 
 "use strict";
 
 const http = require("http");
+const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const os = require("os");
 const WebSocket = require("ws");
 
-const PROTOCOL_VERSION = "v1";
+const { ensureTls, getCaCertPem } = require("./lan-tls");
+const { ensureVapid, createPushSender } = require("./web-push-keys");
+const { createDeviceRegistry } = require("./mobile-device-registry");
+const { createMdnsAdvertiser } = require("./mdns-advertiser");
+
+const PROTOCOL_VERSION = "v2";
 const DEFAULT_PORT = 23334;
 const PORT_RANGE = 5;
+const HTTPS_DEFAULT_PORT = 23339;
+const HTTPS_PORT_RANGE = 5;
 const HEARTBEAT_MS = 30000;
 const CLIENT_TIMEOUT_MS = 90000;
 const RATE_WINDOW_MS = 60000;
 const RATE_MAX = 60;
+// Stricter ceiling for state-changing messages (approval_decision/focus_session):
+// monitoring is chatty, writes shouldn't be.
+const WRITE_RATE_MAX = 20;
 const MAX_CLIENTS = 10;
 const GRACE_PERIOD_MS = 5 * 60 * 1000;          // 5 minutes
 const ROTATION_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;     // a dark phone never leaks a handle
+const CLAWD_HOST = "clawd.local";
 
 const PWA_DIR = path.resolve(__dirname, "../../pwa");
-const TOKEN_PATH = path.join(os.homedir(), ".clawd", "mobile-token.json");
+const CLAWD_DIR = path.join(os.homedir(), ".clawd");
+const TOKEN_PATH = path.join(CLAWD_DIR, "mobile-token.json");
+const TLS_DIR = path.join(CLAWD_DIR, "tls");
+const VAPID_PATH = path.join(CLAWD_DIR, "vapid.json");
+const PUSH_SUBS_PATH = path.join(CLAWD_DIR, "push-subs.json");
+const DEVICES_PATH = path.join(CLAWD_DIR, "mobile-devices.json");
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -96,10 +117,40 @@ function initMobilePreviewServer(ctx) {
   let sessionCache = new Map();
   let httpServer = null;
   let wss = null;
+  let httpsServer = null;
+  let httpsWss = null;
   let activePort = null;
+  let httpsPort = null;
+  let httpsError = null; // last HTTPS-start failure, surfaced to the Settings UI
   let heartbeatTimer = null;
   let rotationTimer = null;
   let closed = false;
+
+  // ── v2 infrastructure (TLS / push / pairing / mDNS / approvals) ──
+  const tlsDir = (ctx && ctx.tlsDir) || TLS_DIR;
+  const deviceRegistry = createDeviceRegistry({
+    filePath: (ctx && ctx.devicesPath) || DEVICES_PATH,
+    now,
+  });
+  let vapid = null;          // populated by ensureVapid() in start()
+  let pushSender = null;
+  let tlsInfo = null;        // { cert, key, ca, leafFingerprintSha256, ... } when HTTPS is up
+  const mdns = createMdnsAdvertiser({ hostname: CLAWD_HOST, getIp: getLocalIP });
+
+  // Pending approvals routed to mobile clients. handle -> { payload, sessionId, createdAt, timer }
+  const approvals = new Map();
+  let decisionListener = null; // set by the MobileApprovalClient via getApprovalTransport().onDecision
+
+  function settingsSnapshot() {
+    try { return (ctx && ctx.getSettingsSnapshot && ctx.getSettingsSnapshot()) || {}; }
+    catch { return {}; }
+  }
+  function approvalsEnabled() { return settingsSnapshot().mobileApprovalsEnabled === true; }
+  function httpsEnabled() { return settingsSnapshot().mobileHttpsEnabled === true; }
+  function connectionMode() {
+    const m = settingsSnapshot().mobileConnectionMode;
+    return m === "tailscale" ? "tailscale" : "lan";
+  }
 
   // ── Token rotation ──
 
@@ -194,11 +245,16 @@ function initMobilePreviewServer(ctx) {
     return newToken;
   }
 
-  // Full reset: regenerates token AND will revoke all device registrations
-  // in Slice 2+ (device-list semantics). regenerateToken() only rotates the
-  // token and kicks connected clients, but does not clear the device roster.
+  // Full reset / emergency kill-switch: rotate the token, kick clients, AND wipe
+  // the durable device roster + push subscriptions so every paired phone must
+  // re-pair. (regenerateToken alone only rotates the token.)
   function resetMobileAccess() {
-    return regenerateToken();
+    const token = regenerateToken();
+    try { deviceRegistry.revokeAll(); } catch {}
+    if (pushSender) {
+      try { for (const id of pushSender.listDeviceIds()) pushSender.unsubscribe(id); } catch {}
+    }
+    return token;
   }
 
   // ── HTTP server (serves PWA + WebSocket upgrade) ──
@@ -227,12 +283,44 @@ function initMobilePreviewServer(ctx) {
     let urlPath;
     try { urlPath = new URL(req.url, "http://localhost").pathname; } catch { res.writeHead(400); res.end(); return; }
 
-    // API endpoint for connection info (M1: no token — must come from Settings page or URL params)
+    // Connection info (no token — consumed by the PWA bootstrap + Settings QR).
     if (urlPath === "/api/connection-info") {
       const ready = Number.isInteger(activePort) && activePort > 0;
-      const info = { status: ready ? "ok" : "starting", port: ready ? activePort : null, lanIp: getLocalIP() };
+      const httpsReady = Number.isInteger(httpsPort) && httpsPort > 0;
+      const info = {
+        status: ready ? "ok" : "starting",
+        port: ready ? activePort : null,
+        httpsPort: httpsReady ? httpsPort : null,
+        httpsReady,
+        lanIp: getLocalIP(),
+        host: CLAWD_HOST,
+        mode: connectionMode(),
+        approvalsEnabled: approvalsEnabled(),
+        pushPublicKey: vapid ? vapid.publicKey : null,
+      };
       res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-cache" });
       res.end(JSON.stringify(info));
+      return;
+    }
+
+    // CA public certificate — phone fetches over plain HTTP before trusting it.
+    // Only the public cert is ever exposed; the CA private key never leaves ~/.clawd/tls.
+    if (urlPath === "/ca.crt") {
+      const pem = getCaCertPem({ dir: tlsDir });
+      if (!pem) { res.writeHead(404); res.end(); return; }
+      res.writeHead(200, {
+        "Content-Type": "application/x-x509-ca-cert",
+        "Content-Disposition": "attachment; filename=clawd-ca.crt",
+        "Cache-Control": "no-cache",
+      });
+      res.end(pem);
+      return;
+    }
+
+    // VAPID public key for Web Push subscribe (public by design).
+    if (urlPath === "/api/push/vapid-public-key") {
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-cache" });
+      res.end(JSON.stringify({ publicKey: vapid ? vapid.publicKey : null }));
       return;
     }
 
@@ -246,99 +334,112 @@ function initMobilePreviewServer(ctx) {
       if (err) { res.writeHead(404); res.end(); return; }
       res.writeHead(200, {
         "Content-Type": MIME[ext] || "application/octet-stream",
-        "Cache-Control": ext === ".html" ? "no-cache" : "public, max-age=3600",
+        // sw.js must never be HTTP-cached or the browser won't notice a new
+        // service worker (and the PWA stays stuck on stale code for up to an hour).
+        "Cache-Control": (ext === ".html" || rel === "sw.js") ? "no-cache" : "public, max-age=3600",
       });
       res.end(data);
     });
   }
 
-  function createServers() {
-    httpServer = http.createServer(serveStatic);
-    wss = new WebSocket.Server({ server: httpServer, path: "/ws" });
+  function send(ws, type, payload) {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    try { ws.send(buildMessage(type, payload)); } catch {}
+  }
 
-    wss.on("connection", (ws, req) => {
-      if (closed) { ws.close(1001, "Server shutting down"); return; }
+  // Per-client ceiling for state-changing messages, separate from the chatty
+  // monitoring window. Returns false when the write should be dropped.
+  function withinWriteLimit(meta) {
+    const nowMs = Date.now();
+    if (!meta.writeWindowStart || nowMs - meta.writeWindowStart > RATE_WINDOW_MS) {
+      meta.writeCount = 0;
+      meta.writeWindowStart = nowMs;
+    }
+    return ++meta.writeCount <= WRITE_RATE_MAX;
+  }
 
-      let url;
-      try { url = new URL(req.url, "http://localhost"); } catch { ws.close(1008, "Bad request"); return; }
+  // Shared connection handler for both the plain-HTTP and HTTPS WebSocket servers.
+  function handleConnection(ws, req, secure) {
+    if (closed) { ws.close(1001, "Server shutting down"); return; }
 
-      // Token validation with grace-period support
-      const clientToken = url.searchParams.get("token");
-      let graceAccepted = false;
-      if (clientToken !== tokenState.token) {
-        // Check grace period for previous token
-        if (tokenState.previous && clientToken === tokenState.previous
-            && tokenState.graceUntil !== null && now() < tokenState.graceUntil) {
-          // Accept via grace — client hasn't acked the rotation yet
-          graceAccepted = true;
-        } else {
-          ws.close(1008, "Invalid token");
-          return;
-        }
-      }
+    let url;
+    try { url = new URL(req.url, "http://localhost"); } catch { ws.close(1008, "Bad request"); return; }
 
-      if (clients.size >= MAX_CLIENTS) {
-        ws.close(1013, "Server busy");
-        return;
-      }
+    // Auth: either the rotating connection token (monitoring, v1-compatible) OR a
+    // durable per-device credential (deviceId+secret) issued at pairing time.
+    const clientToken = url.searchParams.get("token");
+    const deviceId = url.searchParams.get("deviceId");
+    const secret = url.searchParams.get("secret");
+    let graceAccepted = false;
+    let device = null;
 
-      clients.add(ws);
-      const clientId = crypto.randomBytes(8).toString("hex");
-      const clientIp = (req.socket.remoteAddress || "").replace(/^::ffff:/, "");
-      clientMeta.set(ws, { messageCount: 0, windowStart: Date.now(), clientId, ip: clientIp, lastPong: Date.now() });
+    if (deviceId && secret) {
+      device = deviceRegistry.authenticate(deviceId, secret);
+      if (!device) { ws.close(1008, "Invalid device credential"); return; }
+    } else if (clientToken === tokenState.token) {
+      // current token — ok
+    } else if (tokenState.previous && clientToken === tokenState.previous
+        && tokenState.graceUntil !== null && now() < tokenState.graceUntil) {
+      graceAccepted = true;
+    } else {
+      ws.close(1008, "Invalid token");
+      return;
+    }
 
-      // If a rotation was pending and this client has the current token, rotate now
-      if (tokenState.rotationPending && clientToken === tokenState.token) {
-        if (performRotation()) {
-          scheduleRotation(); // arm the next 24h timer
-        }
-      }
+    if (clients.size >= MAX_CLIENTS) { ws.close(1013, "Server busy"); return; }
 
-      // Send snapshot on connect
-      try {
-        const snapshot = {};
-        for (const [sid, data] of sessionCache) snapshot[sid] = data;
-        ws.send(buildMessage("snapshot", { sessions: snapshot }));
-      } catch {}
+    clients.add(ws);
+    const clientId = crypto.randomBytes(8).toString("hex");
+    const clientIp = (req.socket.remoteAddress || "").replace(/^::ffff:/, "");
+    clientMeta.set(ws, {
+      messageCount: 0, windowStart: Date.now(),
+      writeCount: 0, writeWindowStart: Date.now(),
+      clientId, ip: clientIp, lastPong: Date.now(),
+      secure: !!secure,
+      protocol: "v1",
+      deviceId: device ? device.deviceId : null,
+      approvalsAllowed: device ? device.approvalsAllowed !== false : false,
+    });
 
-      startHeartbeat();
+    // Pending rotation rotates as soon as a current-token holder appears.
+    if (tokenState.rotationPending && clientToken === tokenState.token) {
+      if (performRotation()) scheduleRotation();
+    }
 
-      // If client connected via grace-period token, send the new token immediately
-      // (after startHeartbeat so the first heartbeat tick doesn't duplicate the send)
-      if (graceAccepted) {
-        const meta = clientMeta.get(ws);
-        if (meta) meta.pendingRotationAcks = 1;
-        try {
-          ws.send(buildMessage("token_rotate", {
-            newToken: tokenState.token,
-            expiresAt: tokenState.graceUntil,
-          }));
-        } catch {}
-      }
+    // Session snapshot on connect (read-only monitoring — same as v1).
+    try {
+      const snapshot = {};
+      for (const [sid, data] of sessionCache) snapshot[sid] = data;
+      ws.send(buildMessage("snapshot", { sessions: snapshot }));
+    } catch {}
+
+    startHeartbeat();
+
+    if (graceAccepted) {
+      const meta = clientMeta.get(ws);
+      if (meta) meta.pendingRotationAcks = 1;
+      send(ws, "token_rotate", { newToken: tokenState.token, expiresAt: tokenState.graceUntil });
+    }
+
+    ws.isAlive = true;
+    ws.on("pong", () => {
       ws.isAlive = true;
-      ws.on("pong", () => {
-        ws.isAlive = true;
-        const meta = clientMeta.get(ws);
-        if (meta) meta.lastPong = Date.now();
-      });
+      const meta = clientMeta.get(ws);
+      if (meta) meta.lastPong = Date.now();
+    });
 
-      ws.on("message", (data) => {
-        if (closed) return;
-        const meta = clientMeta.get(ws);
-        if (!meta) return;
-        const nowMs = Date.now();
-        if (nowMs - meta.windowStart > RATE_WINDOW_MS) { meta.messageCount = 0; meta.windowStart = nowMs; }
+    ws.on("message", (data) => {
+      if (closed) return;
+      const meta = clientMeta.get(ws);
+      if (!meta) return;
+      const nowMs = Date.now();
+      if (nowMs - meta.windowStart > RATE_WINDOW_MS) { meta.messageCount = 0; meta.windowStart = nowMs; }
       if (++meta.messageCount > RATE_MAX) { ws.close(1008, "Rate limit"); return; }
-      // Handle token_rotate_ack — purely informational, no state change
-      try {
-        const parsed = JSON.parse(data);
-        if (parsed && parsed.type === "token_rotate_ack") {
-          meta.pendingRotationAcks = 0;
-          console.log(`[mobile-preview] token_rotate_ack from ${meta.ip}`);
-          return;
-        }
-      } catch {}
-      // M1: read-only — ignore all other client messages (rate-limit still applies above)
+
+      let msg;
+      try { msg = JSON.parse(data); } catch { return; }
+      if (!msg || typeof msg.type !== "string") return;
+      handleClientMessage(ws, meta, msg);
     });
 
     ws.on("close", () => {
@@ -347,7 +448,127 @@ function initMobilePreviewServer(ctx) {
       if (clients.size === 0) stopHeartbeat();
     });
     ws.on("error", () => { clients.delete(ws); clientMeta.delete(ws); });
-  });
+  }
+
+  function handleClientMessage(ws, meta, msg) {
+    switch (msg.type) {
+      case "token_rotate_ack":
+        meta.pendingRotationAcks = 0;
+        return;
+
+      // v2 handshake — only clients that announce v2 receive approval/detail traffic.
+      case "client_hello": {
+        meta.protocol = msg.protocol === "v2" ? "v2" : "v1";
+        if (meta.protocol === "v2") sendApprovalSnapshot(ws, meta);
+        return;
+      }
+
+      // Pairing: swap the one-time connection token for a durable per-device secret.
+      // Only a token-authed connection (deviceId still null) may pair — a device
+      // already holding a secret re-pairs over a fresh token connection.
+      case "pair": {
+        if (meta.deviceId !== null) {
+          send(ws, "pair_error", { message: "pairing requires a fresh connection token" });
+          return;
+        }
+        const id = String(msg.deviceId || "").trim();
+        if (!/^[A-Za-z0-9_-]{8,128}$/.test(id)) {
+          send(ws, "pair_error", { message: "invalid deviceId" });
+          return;
+        }
+        let entry;
+        try { entry = deviceRegistry.register({ deviceId: id, label: msg.label }); }
+        catch { send(ws, "pair_error", { message: "registration failed" }); return; }
+        meta.deviceId = entry.deviceId;
+        meta.approvalsAllowed = entry.approvalsAllowed !== false;
+        send(ws, "paired", { deviceId: entry.deviceId, secret: entry.secret, label: entry.label });
+        return;
+      }
+
+      case "request_detail": {
+        const sid = String(msg.sessionId || "");
+        const session = ctx.sessions && ctx.sessions.get(sid);
+        send(ws, "detail", { sessionId: sid, data: buildDetailPayload(sid, session) });
+        return;
+      }
+
+      case "subscribe_push": {
+        if (!meta.deviceId || !pushSender) return;
+        if (msg.subscription === null) { pushSender.unsubscribe(meta.deviceId); return; }
+        if (msg.subscription && typeof msg.subscription === "object") {
+          pushSender.subscribe(meta.deviceId, msg.subscription);
+        }
+        return;
+      }
+
+      // ── state-changing (write) messages — gated + write-rate-limited ──
+      case "approval_decision": {
+        if (!canWrite(meta)) return;
+        if (!withinWriteLimit(meta)) { logDrop(meta, "approval_decision"); return; }
+        const handle = String(msg.handle || "");
+        if (!approvals.has(handle)) return; // late / duplicate / unknown — drop silently
+        if (typeof decisionListener === "function") {
+          try { decisionListener(handle, msg.decision); } catch {}
+        }
+        return;
+      }
+
+      case "focus_session": {
+        if (!canWrite(meta)) return;
+        if (!withinWriteLimit(meta)) { logDrop(meta, "focus_session"); return; }
+        const sid = String(msg.sessionId || "");
+        if (sid && ctx && typeof ctx.focusSession === "function") {
+          try { ctx.focusSession(sid, { requestSource: "mobile" }); } catch {}
+        }
+        return;
+      }
+
+      default:
+        return; // unknown types ignored (forward-compat)
+    }
+  }
+
+  function isLoopbackIp(ip) {
+    return ip === "127.0.0.1" || ip === "::1";
+  }
+
+  // A connection may issue writes only when: approvals are globally enabled, the
+  // connection is a paired device, that device is allowed to approve, and it
+  // arrived over HTTPS or loopback. The durable device secret rides in the WS
+  // URL, so over plain ws on a shared LAN it is sniffable — refusing writes there
+  // stops a passive eavesdropper from replaying it to approve tool runs. Plain-HTTP
+  // LAN devices can still monitor; they just can't approve until HTTPS is enabled.
+  function canWrite(meta) {
+    if (!approvalsEnabled()) return false;
+    if (!meta.deviceId || !meta.approvalsAllowed) return false;
+    if (!meta.secure && !isLoopbackIp(meta.ip)) return false;
+    return true;
+  }
+
+  function logDrop(meta, kind) {
+    console.warn(`[mobile-preview] dropped ${kind} from ${meta.ip} (write rate limit)`);
+  }
+
+  // ws re-emits the underlying server's 'error' (e.g. EADDRINUSE) on the
+  // WebSocket.Server; swallow it here so the port-retry in listenWithRange (which
+  // listens on the http server's own 'error') can do its job without crashing.
+  function ignoreWssError(err) {
+    if (err && err.code !== "EADDRINUSE") console.error("[mobile-preview] wss error:", err.message);
+  }
+
+  function createHttpServer() {
+    httpServer = http.createServer(serveStatic);
+    wss = new WebSocket.Server({ server: httpServer, path: "/ws" });
+    wss.on("error", ignoreWssError);
+    wss.on("connection", (ws, req) => handleConnection(ws, req, false));
+  }
+
+  function createHttpsServer() {
+    if (!tlsInfo) return;
+    httpsServer = https.createServer({ cert: tlsInfo.cert, key: tlsInfo.key }, serveStatic);
+    httpsWss = new WebSocket.Server({ server: httpsServer, path: "/ws" });
+    httpsWss.on("error", ignoreWssError);
+    httpsWss.on("connection", (ws, req) => handleConnection(ws, req, true));
   }
 
   function startHeartbeat() {
@@ -417,6 +638,101 @@ function initMobilePreviewServer(ctx) {
     broadcast(buildMessage("state", { sessionId: sid, data }));
   }
 
+  // Superset of buildPayload for the per-session detail view. recentEvents lives
+  // only on the internal session object (never in the wire snapshot), so we read
+  // it straight from ctx.sessions here. No raw cwd/pid/host — only the basename.
+  function buildDetailPayload(sid, session) {
+    const base = buildPayload(sid, session);
+    if (!base) return null;
+    const out = { ...base, canFocus: typeof (ctx && ctx.focusSession) === "function" };
+    if (session.model) out.model = String(session.model);
+    if (session.contextUsage && typeof session.contextUsage === "object") {
+      const u = session.contextUsage;
+      out.contextUsage = {
+        used: typeof u.used === "number" ? u.used : null,
+        limit: typeof u.limit === "number" ? u.limit : undefined,
+        percent: typeof u.percent === "number" ? u.percent : undefined,
+      };
+    }
+    if (typeof session.assistantLastOutput === "string" && session.assistantLastOutput) {
+      out.lastOutput = session.assistantLastOutput.slice(0, 800);
+    }
+    return out;
+  }
+
+  // ── Approval transport (v2) ──
+  // The MobileApprovalClient adapter pushes redacted approval payloads here and
+  // registers a decision listener; the seam in permission.js routes decisions
+  // back to Claude Code. Payloads are ALREADY redacted by buildRemoteApprovalPayload.
+
+  function approvalWire(payload) {
+    const wire = { kind: "approval", title: payload.title, detail: payload.detail };
+    if (Array.isArray(payload.suggestions) && payload.suggestions.length) {
+      wire.suggestions = payload.suggestions;
+    }
+    return wire;
+  }
+
+  function broadcastApproval(type, payload) {
+    const msg = buildMessage(type, payload);
+    for (const c of clients) {
+      if (c.readyState !== WebSocket.OPEN) continue;
+      const meta = clientMeta.get(c);
+      if (!meta || meta.protocol !== "v2" || !meta.approvalsAllowed) continue;
+      try { c.send(msg); } catch {}
+    }
+  }
+
+  function sendApprovalSnapshot(ws, meta) {
+    const list = [];
+    if (approvalsEnabled() && meta.approvalsAllowed) {
+      for (const [handle, a] of approvals) {
+        list.push({ handle, sessionId: a.sessionId, ...approvalWire(a.payload) });
+      }
+    }
+    send(ws, "approval_snapshot", { approvals: list });
+  }
+
+  function firePush(handle, payload) {
+    if (!pushSender || !pushSender.hasSub()) return;
+    const body = String(payload.detail || payload.title || "Approval needed")
+      .replace(/\s+/g, " ").trim().slice(0, 140);
+    Promise.resolve(pushSender.send({
+      title: payload.title || "Approval needed",
+      body,
+      handle,
+      tag: `approval-${handle}`,
+    })).catch(() => {});
+  }
+
+  function pushApproval(handle, payload, sessionId) {
+    approvals.set(handle, { payload, sessionId: sessionId || null, createdAt: Date.now() });
+    broadcastApproval("approval_request", { handle, sessionId: sessionId || null, ...approvalWire(payload) });
+    firePush(handle, payload);
+  }
+
+  function neutralizeApproval(handle, outcome) {
+    if (!approvals.has(handle)) return;
+    approvals.delete(handle);
+    broadcastApproval("approval_resolved", { handle, outcome: outcome || null });
+  }
+
+  function getApprovalTransport() {
+    return {
+      pushApproval,
+      neutralizeApproval,
+      onDecision(fn) { decisionListener = typeof fn === "function" ? fn : null; },
+      isApprovalsEnabled: () => approvalsEnabled(),
+      hasClients: () => {
+        for (const meta of clientMeta.values()) {
+          if (meta.protocol === "v2" && meta.approvalsAllowed) return true;
+        }
+        return false;
+      },
+      hasPushSub: () => !!(pushSender && pushSender.hasSub()),
+    };
+  }
+
   // ── Session polling (detects state changes + deletions) ──
 
   function pollSessions() {
@@ -458,40 +774,107 @@ function initMobilePreviewServer(ctx) {
 
   // ── Public API ──
 
-  function start() {
-    closed = false;
-    createServers();
-    const ports = [];
-    for (let i = 0; i < PORT_RANGE; i++) ports.push(DEFAULT_PORT + i);
-    let idx = 0;
-
-    const ready = new Promise((resolve, reject) => {
+  function listenWithRange(server, basePort, range) {
+    return new Promise((resolve, reject) => {
+      const ports = [];
+      for (let i = 0; i < range; i++) ports.push(basePort + i);
+      let idx = 0;
       const onError = (err) => {
         if (err.code === "EADDRINUSE" && idx < ports.length - 1) {
           idx++;
-          httpServer.listen(ports[idx], "0.0.0.0");
+          server.listen(ports[idx], "0.0.0.0");
           return;
         }
-        console.error("[lan-ws] Server error:", err.message);
-        httpServer.removeListener("error", onError);
-        httpServer.removeListener("listening", onListening);
+        server.removeListener("error", onError);
+        server.removeListener("listening", onListening);
         reject(err);
       };
       const onListening = () => {
-        activePort = ports[idx];
-        console.log(`[mobile-preview] started on 0.0.0.0:${activePort}`);
-        httpServer.removeListener("error", onError);
-        httpServer.removeListener("listening", onListening);
-        resolve(activePort);
+        server.removeListener("error", onError);
+        server.removeListener("listening", onListening);
+        resolve(ports[idx]);
       };
-      httpServer.on("error", onError);
-      httpServer.on("listening", onListening);
+      server.on("error", onError);
+      server.on("listening", onListening);
+      server.listen(ports[0], "0.0.0.0");
     });
+  }
 
-    httpServer.listen(ports[0], "0.0.0.0");
+  async function startHttps() {
+    httpsError = null;
+    let lanIp;
+    try { lanIp = getLocalIP(); } catch { lanIp = null; }
+    try {
+      tlsInfo = await ensureTls({ dir: tlsDir, lanIp, hostnames: [CLAWD_HOST, "localhost"] });
+    } catch (err) {
+      console.error("[mobile-preview] TLS init failed:", err.message);
+      httpsError = `Certificate setup failed: ${err.message}`;
+      tlsInfo = null;
+      return;
+    }
+    createHttpsServer();
+    if (!httpsServer) { httpsError = "Could not create the HTTPS server"; return; }
+    try {
+      httpsPort = await listenWithRange(httpsServer, HTTPS_DEFAULT_PORT, HTTPS_PORT_RANGE);
+      console.log(`[mobile-preview] HTTPS on 0.0.0.0:${httpsPort}`);
+      // clawd.local matters once we hand out https://clawd.local:<port> URLs.
+      try { mdns.start(); } catch {}
+    } catch (err) {
+      console.error("[mobile-preview] HTTPS listen failed:", err.message);
+      httpsError = `HTTPS could not start: ${err.message}`;
+      try { httpsServer.close(); } catch {}
+      httpsServer = null;
+      if (httpsWss) { try { httpsWss.close(); } catch {} httpsWss = null; }
+      httpsPort = null;
+    }
+  }
+
+  function stopHttps() {
+    httpsError = null;
+    try { mdns.stop(); } catch {}
+    if (httpsWss) { try { httpsWss.close(); } catch {} httpsWss = null; }
+    if (httpsServer) { try { httpsServer.close(); } catch {} httpsServer = null; }
+    httpsPort = null;
+  }
+
+  // VAPID/push keys are only generated once approvals or HTTPS are in play (or a
+  // test injects an explicit path). This keeps pure read-only monitoring from
+  // writing key material under ~/.clawd.
+  async function ensurePushKeysIfNeeded() {
+    if (vapid) return;
+    const wanted = approvalsEnabled() || httpsEnabled() || (ctx && ctx.vapidPath);
+    if (!wanted) return;
+    try {
+      vapid = await ensureVapid({ filePath: (ctx && ctx.vapidPath) || VAPID_PATH });
+      pushSender = createPushSender({ vapid, subsPath: (ctx && ctx.subsPath) || PUSH_SUBS_PATH });
+    } catch (err) {
+      console.error("[mobile-preview] VAPID init failed:", err.message);
+    }
+  }
+
+  // Reconcile push keys + the HTTPS listener with current prefs at runtime. The
+  // Settings toggles (mobileHttpsEnabled / mobileApprovalsEnabled) call this so
+  // the whole server doesn't have to restart.
+  async function reconcile() {
+    if (closed) return;
+    await ensurePushKeysIfNeeded();
+    if (httpsEnabled() && !httpsServer) await startHttps();
+    else if (!httpsEnabled() && httpsServer) stopHttps();
+  }
+
+  async function start() {
+    closed = false;
+
+    createHttpServer();
+    activePort = await listenWithRange(httpServer, DEFAULT_PORT, PORT_RANGE);
+    console.log(`[mobile-preview] started on 0.0.0.0:${activePort}`);
+
+    await ensurePushKeysIfNeeded();
+    if (httpsEnabled()) await startHttps();
+
     pollSessions(); // Prime cache from current state
     scheduleRotation(); // Start the 24h rotation timer
-    return ready;
+    return activePort;
   }
 
   function cleanup() {
@@ -502,8 +885,12 @@ function initMobilePreviewServer(ctx) {
     for (const c of clients) { try { c.close(1001, "Server shutting down"); } catch {} }
     clients.clear();
     clientMeta.clear();
-    if (wss) { try { wss.close(); } catch {} }
-    if (httpServer) { try { httpServer.close(); } catch {} }
+    approvals.clear();
+    decisionListener = null;
+    try { mdns.stop(); } catch {}
+    stopHttps();
+    if (wss) { try { wss.close(); } catch {} wss = null; }
+    if (httpServer) { try { httpServer.close(); } catch {} httpServer = null; }
   }
 
   function onSnapshot() {
@@ -511,14 +898,45 @@ function initMobilePreviewServer(ctx) {
     pollSessions();
   }
 
+  function getHttpsInfo() {
+    return {
+      httpsReady: Number.isInteger(httpsPort) && httpsPort > 0,
+      httpsPort: httpsPort || null,
+      host: CLAWD_HOST,
+      lanIp: getLocalIP(),
+      mode: connectionMode(),
+      caFingerprint: tlsInfo ? tlsInfo.ca.fingerprintSha256 : null,
+      leafFingerprint: tlsInfo ? tlsInfo.leafFingerprintSha256 : null,
+      caExists: !!getCaCertPem({ dir: tlsDir }),
+      lastError: httpsError,
+    };
+  }
+
+  function getPushStatus() {
+    return {
+      hasVapid: !!vapid,
+      publicKey: vapid ? vapid.publicKey : null,
+      subCount: pushSender ? pushSender.listDeviceIds().length : 0,
+    };
+  }
+
   return {
     start,
     cleanup,
     onSnapshot,
+    reconcile,
     getPort: () => activePort,
+    getHttpsPort: () => httpsPort,
     getToken: () => tokenState.token,
     regenerateToken,
     resetMobileAccess,
+    getApprovalTransport,
+    getHttpsInfo,
+    getPushStatus,
+    listDevices: () => deviceRegistry.list(),
+    revokeDevice: (id) => { const r = deviceRegistry.revoke(id); if (pushSender) pushSender.unsubscribe(id); return r; },
+    setDeviceApprovalsAllowed: (id, allowed) => deviceRegistry.setApprovalsAllowed(id, allowed),
+    getLocalIP,
     PROTOCOL_VERSION,
   };
 }

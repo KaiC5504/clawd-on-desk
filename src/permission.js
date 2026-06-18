@@ -1040,16 +1040,34 @@ function dismissPermissionForTerminal(perm) {
   ctx.focusTerminalForSession(perm.sessionId, { fallbackEntry: buildPermissionFocusEntry(perm) });
 }
 
+// All remote-approval surfaces the user has enabled (Telegram + the iPhone PWA).
+// Each is gated by its own isEnabled(); the first to return an actionable
+// decision wins the race in maybeStartRemoteApproval.
+function getActiveRemoteApprovalClients() {
+  const out = [];
+  const tg = getTelegramApprovalClient();
+  if (tg && typeof tg.requestApproval === "function"
+      && (typeof tg.isEnabled !== "function" || tg.isEnabled())) {
+    out.push(tg);
+  }
+  const mobile = typeof ctx.getMobileApprovalClient === "function" ? ctx.getMobileApprovalClient() : null;
+  if (mobile && typeof mobile.requestApproval === "function"
+      && (typeof mobile.isEnabled !== "function" || mobile.isEnabled())) {
+    out.push(mobile);
+  }
+  return out;
+}
+
 function maybeStartRemoteApproval(permEntry) {
   if (!isRemoteApprovalActionable(permEntry)) return false;
   // Auto-pilot resolves synchronously inside showPermissionBubble, but the CC
   // and Codex route branches call startRemoteApproval right after. If the
   // entry is already gone from the pending list it was resolved (auto-approved
-  // or otherwise) — don't fire a Telegram card for a closed request.
+  // or otherwise) — don't fire a remote card for a closed request.
   if (pendingPermissions.indexOf(permEntry) === -1) return false;
-  const client = getTelegramApprovalClient();
-  if (!client || typeof client.requestApproval !== "function") return false;
-  if (typeof client.isEnabled === "function" && !client.isEnabled()) return false;
+
+  const clients = getActiveRemoteApprovalClients();
+  if (clients.length === 0) return false;
 
   const payload = buildRemoteApprovalPayload(permEntry);
   if (!payload) return false;
@@ -1057,50 +1075,70 @@ function maybeStartRemoteApproval(permEntry) {
   const controller = typeof AbortController === "function" ? new AbortController() : null;
   if (controller) permEntry.remoteApprovalAbortController = controller;
 
-  let request;
-  try {
-    request = client.requestApproval(
-      payload,
-      controller ? { signal: controller.signal } : {}
+  // First surface to return an actionable decision wins; the rest are aborted
+  // (their cards grey out via onAbort). The local bubble's resolve also aborts
+  // the controller, so a desktop answer beats every remote surface.
+  let resolvedByRemote = false;
+  const handleDecision = (decision) => {
+    const normalized = normalizeRemoteApprovalDecision(decision);
+    if (!normalized) {
+      if (decision) permLog(`remote approval ignored decision=${compactRemoteApprovalText(decision, 40)}`);
+      return;
+    }
+    if (resolvedByRemote) return;
+    if (pendingPermissions.indexOf(permEntry) === -1) return;
+    resolvedByRemote = true;
+    if (controller) { try { controller.abort(); } catch {} }
+    if (normalized.action === "allow" || normalized.action === "deny") {
+      resolvePermissionEntry(permEntry, normalized.action);
+      return;
+    }
+    if (!isRemoteRichApprovalSupported(permEntry)) {
+      permLog(`remote approval ignored rich decision for agent=${compactRemoteApprovalText(permEntry.agentId || "unknown", 80)}`);
+      return;
+    }
+    if (!applyPermissionSuggestion(permEntry, normalized.index, { requireResolved: true })) {
+      permLog(`remote approval ignored invalid suggestion index=${normalized.index}`);
+      return;
+    }
+    resolvePermissionEntry(permEntry, "allow");
+  };
+
+  const opts = controller
+    ? { signal: controller.signal, sessionId: permEntry.sessionId }
+    : { sessionId: permEntry.sessionId };
+  const promises = [];
+  for (const client of clients) {
+    let request;
+    try {
+      request = client.requestApproval(payload, opts);
+    } catch (err) {
+      permLog(`remote approval failed: ${compactRemoteApprovalText(err && err.message ? err.message : err, 200)}`);
+      continue;
+    }
+    promises.push(
+      Promise.resolve(request)
+        .then(handleDecision)
+        .catch((err) => {
+          permLog(`remote approval failed: ${compactRemoteApprovalText(err && err.message ? err.message : err, 200)}`);
+        })
     );
-  } catch (err) {
+  }
+
+  if (promises.length === 0) {
     if (controller && permEntry.remoteApprovalAbortController === controller) {
       permEntry.remoteApprovalAbortController = null;
     }
-    permLog(`telegram remote approval failed: ${compactRemoteApprovalText(err && err.message ? err.message : err, 200)}`);
     return false;
   }
 
-  Promise.resolve(request)
-    .then((decision) => {
-      const normalized = normalizeRemoteApprovalDecision(decision);
-      if (!normalized) {
-        if (decision) permLog(`telegram remote approval ignored decision=${compactRemoteApprovalText(decision, 40)}`);
-        return;
-      }
-      if (pendingPermissions.indexOf(permEntry) === -1) return;
-      if (normalized.action === "allow" || normalized.action === "deny") {
-        resolvePermissionEntry(permEntry, normalized.action);
-        return;
-      }
-      if (!isRemoteRichApprovalSupported(permEntry)) {
-        permLog(`telegram remote approval ignored rich decision for agent=${compactRemoteApprovalText(permEntry.agentId || "unknown", 80)}`);
-        return;
-      }
-      if (!applyPermissionSuggestion(permEntry, normalized.index, { requireResolved: true })) {
-        permLog(`telegram remote approval ignored invalid suggestion index=${normalized.index}`);
-        return;
-      }
-      resolvePermissionEntry(permEntry, "allow");
-    })
-    .catch((err) => {
-      permLog(`telegram remote approval failed: ${compactRemoteApprovalText(err && err.message ? err.message : err, 200)}`);
-    })
-    .finally(() => {
-      if (controller && permEntry.remoteApprovalAbortController === controller) {
-        permEntry.remoteApprovalAbortController = null;
-      }
-    });
+  // Release the controller reference once every surface has settled (each surface
+  // self-cleans on resolve via resolvePermissionEntry → cancelRemoteApproval).
+  Promise.allSettled(promises).then(() => {
+    if (controller && permEntry.remoteApprovalAbortController === controller) {
+      permEntry.remoteApprovalAbortController = null;
+    }
+  });
   return true;
 }
 

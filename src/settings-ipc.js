@@ -541,6 +541,134 @@ function registerSettingsIpc(options = {}) {
     }
   });
 
+  // ── v2 interactive-mobile settings ──
+
+  handle("settings:mobile-https-info", async () => {
+    try {
+      const lanWsServer = options.getLanWsServer ? options.getLanWsServer() : null;
+      if (!lanWsServer || typeof lanWsServer.getHttpsInfo !== "function") {
+        return { status: "error", message: "LAN bridge not available" };
+      }
+      return { status: "ok", ...lanWsServer.getHttpsInfo() };
+    } catch (err) {
+      return { status: "error", message: (err && err.message) || String(err) };
+    }
+  });
+
+  handle("settings:mobile-push-status", async () => {
+    try {
+      const lanWsServer = options.getLanWsServer ? options.getLanWsServer() : null;
+      if (!lanWsServer || typeof lanWsServer.getPushStatus !== "function") {
+        return { status: "error", message: "LAN bridge not available" };
+      }
+      return { status: "ok", ...lanWsServer.getPushStatus() };
+    } catch (err) {
+      return { status: "error", message: (err && err.message) || String(err) };
+    }
+  });
+
+  handle("settings:list-mobile-devices", async () => {
+    try {
+      const lanWsServer = options.getLanWsServer ? options.getLanWsServer() : null;
+      if (!lanWsServer || typeof lanWsServer.listDevices !== "function") {
+        return { status: "error", message: "LAN bridge not available" };
+      }
+      return { status: "ok", devices: lanWsServer.listDevices() };
+    } catch (err) {
+      return { status: "error", message: (err && err.message) || String(err) };
+    }
+  });
+
+  handle("settings:revoke-mobile-device", async (_event, deviceId) => {
+    if (typeof deviceId !== "string" || !deviceId) {
+      return { status: "error", message: "deviceId must be a non-empty string" };
+    }
+    try {
+      const lanWsServer = options.getLanWsServer ? options.getLanWsServer() : null;
+      if (!lanWsServer || typeof lanWsServer.revokeDevice !== "function") {
+        return { status: "error", message: "LAN bridge not available" };
+      }
+      const removed = lanWsServer.revokeDevice(deviceId);
+      return { status: "ok", removed: !!removed };
+    } catch (err) {
+      return { status: "error", message: (err && err.message) || String(err) };
+    }
+  });
+
+  handle("settings:set-mobile-device-approvals", async (_event, payload) => {
+    if (!payload || typeof payload !== "object") {
+      return { status: "error", message: "payload must be { deviceId, allowed }" };
+    }
+    const { deviceId, allowed } = payload;
+    if (typeof deviceId !== "string" || !deviceId) {
+      return { status: "error", message: "deviceId must be a non-empty string" };
+    }
+    try {
+      const lanWsServer = options.getLanWsServer ? options.getLanWsServer() : null;
+      if (!lanWsServer || typeof lanWsServer.setDeviceApprovalsAllowed !== "function") {
+        return { status: "error", message: "LAN bridge not available" };
+      }
+      const ok = lanWsServer.setDeviceApprovalsAllowed(deviceId, !!allowed);
+      return { status: "ok", updated: !!ok };
+    } catch (err) {
+      return { status: "error", message: (err && err.message) || String(err) };
+    }
+  });
+
+  // QR generation must happen main-side: the sandboxed settings preload can't
+  // require app modules (incl. qrcode). Returns data-URLs the renderer drops
+  // straight into <img>.
+  handle("settings:mobile-pairing-qr", async () => {
+    try {
+      const lanWsServer = options.getLanWsServer ? options.getLanWsServer() : null;
+      if (!lanWsServer) return { status: "error", message: "LAN bridge not available" };
+      const port = lanWsServer.getPort();
+      const tok = lanWsServer.getToken();
+      if (!Number.isInteger(port) || port <= 0 || typeof tok !== "string" || !tok) {
+        return { status: "starting", message: "LAN bridge is starting" };
+      }
+
+      const httpsInfo = typeof lanWsServer.getHttpsInfo === "function"
+        ? lanWsServer.getHttpsInfo()
+        : null;
+      const lanIp = typeof lanWsServer.getLocalIP === "function"
+        ? lanWsServer.getLocalIP()
+        : (httpsInfo && httpsInfo.lanIp) || "127.0.0.1";
+      const host = (httpsInfo && httpsInfo.host) || "clawd.local";
+      const httpsReady = !!(httpsInfo && httpsInfo.httpsReady && httpsInfo.httpsPort);
+
+      const scheme = httpsReady ? "https" : "http";
+      const usePort = httpsReady ? httpsInfo.httpsPort : port;
+      const secureParam = httpsReady ? "&secure=1" : "";
+      // Each QR connects to the same authority it loads from: the clawd.local
+      // variant stays DHCP-resilient (resolved via mDNS), while the raw-IP
+      // variant is the fallback for phones where .local doesn't resolve.
+      const buildUrl = (authority) =>
+        `${scheme}://${authority}:${usePort}/mobile/?host=${encodeURIComponent(authority)}` +
+        `&port=${usePort}&token=${encodeURIComponent(tok)}${secureParam}`;
+      // clawd.local is only advertised (mDNS) while HTTPS is up; without it the
+      // name won't resolve, so fall the primary QR back to the raw IP.
+      const hostUrl = buildUrl(httpsReady ? host : lanIp);
+      const ipUrl = buildUrl(lanIp);
+
+      const QRCode = require("qrcode");
+      const qrOpts = { errorCorrectionLevel: "M", margin: 1, width: 240 };
+      const [hostQr, ipQr] = await Promise.all([
+        QRCode.toDataURL(hostUrl, qrOpts),
+        QRCode.toDataURL(ipUrl, qrOpts),
+      ]);
+
+      return {
+        status: "ok",
+        httpsReady,
+        host: { url: hostUrl, qr: hostQr },
+        ip: { url: ipUrl, qr: ipQr },
+      };
+    } catch (err) {
+      return { status: "error", message: (err && err.message) || String(err) };
+    }
+  });
+
   return {
     dispose() {
       while (disposers.length) {
