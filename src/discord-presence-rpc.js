@@ -362,6 +362,7 @@ function createDiscordPresenceBridge({ getConfig, log, createConnection, ipcPath
       teardownSocket();
       connected = false;
       connecting = false;
+      reconnectAttempts = 0; // don't inherit stale backoff on a later re-enable
       buf = Buffer.alloc(0);
       lastPayloadSig = "";
       lastActivity = null;

@@ -3860,6 +3860,7 @@ if (!gotTheLock) {
     globalShortcut.unregisterAll();
     void settingsSizePreviewSession.cleanup();
     stopTelegramApprovalSidecar();
+    if (discordPresenceBridge) discordPresenceBridge.stop();
     if (typeof unsubscribeHardwareBuddySettings === "function") {
       unsubscribeHardwareBuddySettings();
       unsubscribeHardwareBuddySettings = null;
