@@ -1210,6 +1210,15 @@
   }
 
   // === Init ===
+
+  // Lock the viewport scale. Safari ignores user-scalable=no for accessibility, so
+  // pinch-zoom is blocked here via its proprietary gesture events; double-tap zoom is
+  // handled by touch-action: manipulation in CSS. Scrolling uses touch events, not
+  // gesture events, so it's unaffected.
+  ["gesturestart", "gesturechange", "gestureend"].forEach(function(evt) {
+    document.addEventListener(evt, function(e) { e.preventDefault(); }, { passive: false });
+  });
+
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", function() { new App(); });
   else new App();
 })();
