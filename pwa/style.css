@@ -280,7 +280,7 @@ body { display: flex; flex-direction: column; height: 100%; }
 }
 .log-toggle::after { content: ""; margin-left: auto; border: 4px solid transparent; border-top-color: var(--faint); }
 .log-toggle.open::after { border-top-color: transparent; border-bottom-color: var(--faint); }
-.log-body { display: none; background: var(--card); border: 0.5px solid var(--card-border); border-top: none; border-radius: 0 0 var(--radius) var(--radius); padding: 8px 14px; max-height: 200px; overflow-y: auto; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.923rem; color: var(--faint); }
+.log-body { display: none; background: var(--card); border: 0.5px solid var(--card-border); border-radius: var(--radius); margin-top: 6px; padding: 8px 14px; max-height: 200px; overflow-y: auto; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.923rem; color: var(--faint); }
 .log-body.open { display: block; }
 
 /* === Toast === */

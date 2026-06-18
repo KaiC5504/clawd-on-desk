@@ -177,6 +177,7 @@
       this.onStateChange = null; this.onMessage = null; this.onDisconnected = null;
       this.onOpen = null; this.onNeedsPairing = null; this.onCodeError = null;
       this._hiddenAt = 0;
+      this._hasConnectedOnce = false;
       this.deviceId = this._loadDeviceId();
       this.paired = this._loadPairing();
       this._triedDurable = false;
@@ -286,7 +287,12 @@
       socket.onopen = function() {
         if (socket !== self.ws) return; // stale socket — ignore
         connected = true; self.retryCount = 0; self.reconnectDelay = 1000; self._forceToken = false;
-        self._setState("connected"); log("Connected"); showToast(t("toast_connected"), "success");
+        self._setState("connected"); log("Connected");
+        // Announce only on the genuine first pairing. An already-paired device is
+        // "still connected" — a foreground reconnect or a cold relaunch just updates
+        // the header dot silently. (_hasConnectedOnce guards a double-toast in the
+        // brief window before the first pairing credential is stored.)
+        if (!self.isPaired() && !self._hasConnectedOnce) { self._hasConnectedOnce = true; showToast(t("toast_connected"), "success"); }
         // Dismiss any persistent toasts (e.g. retry hint)
         var persisted = document.querySelectorAll(".toast-persist");
         for (var i = 0; i < persisted.length; i++) { persisted[i].remove(); }
