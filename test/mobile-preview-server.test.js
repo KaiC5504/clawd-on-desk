@@ -1181,3 +1181,196 @@ describe("Mobile Preview v2 — public HTTP endpoints", () => {
     assert.ok(body.publicKey.length > 0);
   });
 });
+
+// ── v2: typed pairing code (camera-free A2HS pairing) ──
+
+const CROCKFORD32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+function connectWithCode(port, code) {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?code=${encodeURIComponent(code)}`);
+  const messages = [];
+  const waiters = [];
+  ws.on("message", (data) => {
+    try {
+      const msg = JSON.parse(data);
+      messages.push(msg);
+      for (let i = waiters.length - 1; i >= 0; i--) {
+        if (waiters[i].type === msg.type) waiters.splice(i, 1)[0].resolve(msg);
+      }
+    } catch {}
+  });
+  return {
+    ws,
+    waitFor(type, timeoutMs = 5000) {
+      const existing = messages.find((m) => m.type === type);
+      if (existing) return Promise.resolve(existing);
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`Timeout waiting for ${type}`)), timeoutMs);
+        waiters.push({ type, resolve: (msg) => { clearTimeout(timer); resolve(msg); } });
+      });
+    },
+    send(obj) { ws.send(JSON.stringify(obj)); },
+    close() { ws.close(); },
+  };
+}
+
+describe("Mobile Preview v2 — typed pairing code", () => {
+  let server;
+  let port;
+  let tmpDir;
+  let settings;
+  let clock;
+  const sessions = new Map();
+
+  function ctxPaths(extra = {}) {
+    return {
+      sessions,
+      getSettingsSnapshot: () => settings,
+      now: () => clock,
+      tokenPath: path.join(tmpDir, "mobile-token.json"),
+      tlsDir: path.join(tmpDir, "tls"),
+      vapidPath: path.join(tmpDir, "vapid.json"),
+      subsPath: path.join(tmpDir, "push-subs.json"),
+      devicesPath: path.join(tmpDir, "mobile-devices.json"),
+      ...extra,
+    };
+  }
+
+  before(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-code-"));
+  });
+
+  after(() => {
+    if (server) { try { server.cleanup(); } catch {} server = null; }
+    sessions.clear();
+    try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+  });
+
+  async function freshServer(extra = {}) {
+    if (server) { server.cleanup(); await new Promise((r) => setTimeout(r, 100)); }
+    sessions.clear();
+    clock = 1700000000000;
+    settings = { mobileApprovalsEnabled: true };
+    server = initMobilePreviewServer(ctxPaths(extra));
+    port = await server.start();
+    return server;
+  }
+
+  it("getPairingCode returns a stable 8-char Crockford code with a future expiry", async () => {
+    await freshServer();
+    const a = server.getPairingCode();
+    assert.strictEqual(typeof a.code, "string");
+    assert.strictEqual(a.code.length, 8);
+    assert.ok(/^[0-9A-HJKMNP-TV-Z]{8}$/.test(a.code), "code uses Crockford base32 (no I/L/O/U)");
+    for (const ch of a.code) assert.ok(CROCKFORD32.includes(ch));
+    assert.ok(a.expiresAt > clock, "expiry is in the future");
+    const b = server.getPairingCode();
+    assert.strictEqual(b.code, a.code, "code is stable across reads until consumed/expired");
+  });
+
+  it("accepts a WebSocket using a valid ?code= and sends a snapshot", async () => {
+    await freshServer();
+    const { code } = server.getPairingCode();
+    const client = connectWithCode(port, code);
+    await waitForOpen(client.ws);
+    const snap = await client.waitFor("snapshot");
+    assert.strictEqual(snap.version, "v2");
+    client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("normalizes case and separators in the submitted code", async () => {
+    await freshServer();
+    const { code } = server.getPairingCode();
+    const messy = (code.slice(0, 4) + "-" + code.slice(4)).toLowerCase();
+    const client = connectWithCode(port, messy);
+    await waitForOpen(client.ws);
+    const snap = await client.waitFor("snapshot");
+    assert.ok(snap.version, "lowercase + dashed code is accepted");
+    client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("rejects a WebSocket using an invalid code with close 1008", async () => {
+    await freshServer();
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?code=ZZZZZZZ0`);
+    assert.strictEqual(await waitForClose(ws), 1008);
+  });
+
+  it("rejects an expired code with close 1008", async () => {
+    await freshServer();
+    const { code, expiresAt } = server.getPairingCode();
+    clock = expiresAt + 1;
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?code=${code}`);
+    assert.strictEqual(await waitForClose(ws), 1008);
+  });
+
+  it("rotates the code after 5 failed attempts (brute-force progress wiped)", async () => {
+    await freshServer();
+    const { code } = server.getPairingCode();
+    for (let i = 0; i < 5; i++) {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?code=ZZZZZZZ${i}`);
+      await waitForClose(ws);
+    }
+    const after = server.getPairingCode();
+    assert.notStrictEqual(after.code, code, "code rotates after the attempt cap");
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?code=${code}`);
+    assert.strictEqual(await waitForClose(ws), 1008, "the original code no longer works");
+  });
+
+  it("issues durable creds when pairing via a code, then consumes the code (single-use)", async () => {
+    await freshServer();
+    const { code } = server.getPairingCode();
+    const client = connectWithCode(port, code);
+    await waitForOpen(client.ws);
+    await client.waitFor("snapshot");
+    client.send({ type: "client_hello", protocol: "v2" });
+    client.send({ type: "pair", deviceId: "code-paired-01", label: "iPhone" });
+    const paired = await client.waitFor("paired");
+    assert.ok(paired.deviceId && paired.secret, "pairing issues durable creds");
+
+    const after = server.getPairingCode();
+    assert.notStrictEqual(after.code, code, "a successful pair rotates the code");
+    const reused = new WebSocket(`ws://127.0.0.1:${port}/ws?code=${code}`);
+    assert.strictEqual(await waitForClose(reused), 1008, "the consumed code no longer authenticates");
+
+    const durable = connectWithCredential(port, { deviceId: paired.deviceId, secret: paired.secret });
+    await waitForOpen(durable.ws);
+    const snap = await durable.waitFor("snapshot");
+    assert.ok(snap.version, "durable creds issued via the code work on reconnect");
+    client.close();
+    durable.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("a code-authed connection cannot drive a decision before it pairs", async () => {
+    await freshServer();
+    const transport = server.getApprovalTransport();
+    let fired = null;
+    transport.onDecision((handle, decision) => { fired = { handle, decision }; });
+    transport.pushApproval("h-code", { title: "rm -rf", detail: "scary" }, "s-c");
+
+    const { code } = server.getPairingCode();
+    const client = connectWithCode(port, code);
+    await waitForOpen(client.ws);
+    await client.waitFor("snapshot");
+    client.send({ type: "client_hello", protocol: "v2" });
+    client.send({ type: "approval_decision", handle: "h-code", decision: "allow" });
+    await new Promise((r) => setTimeout(r, 300));
+
+    assert.strictEqual(fired, null, "a code-only (unpaired) connection must not drive decisions");
+    client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("regeneratePairingCode immediately replaces the current code", async () => {
+    await freshServer();
+    const a = server.getPairingCode();
+    const b = server.regeneratePairingCode();
+    assert.notStrictEqual(b.code, a.code, "a new code is issued");
+    assert.strictEqual(b.code.length, 8);
+    assert.ok(b.expiresAt > clock);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?code=${a.code}`);
+    assert.strictEqual(await waitForClose(ws), 1008, "the replaced code stops working");
+  });
+});

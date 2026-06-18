@@ -39,6 +39,15 @@ const ROTATION_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;     // a dark phone never leaks a handle
 const CLAWD_HOST = "clawd.local";
 
+// Typed pairing code: a short, human-typeable bootstrap credential for the iOS
+// home-screen app (no URL token, its own empty storage). 8 chars of Crockford
+// base32 ≈ 40 bits; single successful use; auto-expires; rotates after too many
+// wrong guesses so brute-force progress is wiped.
+const PAIRING_CODE_LENGTH = 8;
+const PAIRING_CODE_TTL_MS = 10 * 60 * 1000;     // 10 minutes
+const PAIRING_CODE_MAX_ATTEMPTS = 5;
+const CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"; // drops I/L/O/U
+
 const PWA_DIR = path.resolve(__dirname, "../../pwa");
 const CLAWD_DIR = path.join(os.homedir(), ".clawd");
 const TOKEN_PATH = path.join(CLAWD_DIR, "mobile-token.json");
@@ -103,6 +112,24 @@ function buildMessage(type, payload) {
 function isPathInside(parent, child) {
   const relative = path.relative(parent, child);
   return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function generatePairingCode() {
+  // 256 % 32 === 0, so (byte % 32) draws each symbol from exactly 8 byte values
+  // — no modulo bias.
+  const bytes = crypto.randomBytes(PAIRING_CODE_LENGTH);
+  let out = "";
+  for (let i = 0; i < PAIRING_CODE_LENGTH; i++) out += CROCKFORD_ALPHABET[bytes[i] % 32];
+  return out;
+}
+
+// Forgiving on input: Crockford decode aliases (O→0, I/L→1), case-insensitive,
+// and any separator (dash/space) or stray char is dropped, leaving pure base32.
+function normalizePairingCode(input) {
+  const aliased = String(input || "").toUpperCase().replace(/O/g, "0").replace(/[IL]/g, "1");
+  let out = "";
+  for (const ch of aliased) if (CROCKFORD_ALPHABET.includes(ch)) out += ch;
+  return out;
 }
 
 function initMobilePreviewServer(ctx) {
@@ -257,6 +284,43 @@ function initMobilePreviewServer(ctx) {
     return token;
   }
 
+  // ── Typed pairing code (ephemeral — never written to disk) ──
+
+  let pairingCodeState = null; // { code, expiresAt, attempts }
+
+  function freshPairingCode(nowMs) {
+    pairingCodeState = {
+      code: generatePairingCode(),
+      expiresAt: nowMs + PAIRING_CODE_TTL_MS,
+      attempts: 0,
+    };
+    return { code: pairingCodeState.code, expiresAt: pairingCodeState.expiresAt };
+  }
+
+  // Lazily minted on first read (the desktop must display it before anyone can
+  // type it), and re-minted once it lapses so Settings always shows a live code.
+  function currentPairingCode(nowMs) {
+    if (!pairingCodeState || nowMs >= pairingCodeState.expiresAt) return freshPairingCode(nowMs);
+    return { code: pairingCodeState.code, expiresAt: pairingCodeState.expiresAt };
+  }
+
+  function validatePairingCode(input, nowMs) {
+    if (!pairingCodeState) return false;
+    if (nowMs >= pairingCodeState.expiresAt) { pairingCodeState = null; return false; }
+    const got = normalizePairingCode(input);
+    const want = pairingCodeState.code;
+    let ok = false;
+    if (got.length === want.length) {
+      try { ok = crypto.timingSafeEqual(Buffer.from(got), Buffer.from(want)); } catch { ok = false; }
+    }
+    if (!ok) {
+      pairingCodeState.attempts += 1;
+      if (pairingCodeState.attempts >= PAIRING_CODE_MAX_ATTEMPTS) freshPairingCode(nowMs);
+      return false;
+    }
+    return true;
+  }
+
   // ── HTTP server (serves PWA + WebSocket upgrade) ──
 
   function getLocalIP() {
@@ -365,17 +429,24 @@ function initMobilePreviewServer(ctx) {
     let url;
     try { url = new URL(req.url, "http://localhost"); } catch { ws.close(1008, "Bad request"); return; }
 
-    // Auth: either the rotating connection token (monitoring, v1-compatible) OR a
-    // durable per-device credential (deviceId+secret) issued at pairing time.
+    // Auth, in order of precedence:
+    //   1. durable per-device credential (deviceId+secret) issued at pairing time
+    //   2. short-lived typed pairing code (camera-free A2HS bootstrap)
+    //   3. the rotating connection token (monitoring, v1-compatible)
     const clientToken = url.searchParams.get("token");
     const deviceId = url.searchParams.get("deviceId");
     const secret = url.searchParams.get("secret");
+    const pairingCodeInput = url.searchParams.get("code");
     let graceAccepted = false;
     let device = null;
+    let viaPairingCode = false;
 
     if (deviceId && secret) {
       device = deviceRegistry.authenticate(deviceId, secret);
       if (!device) { ws.close(1008, "Invalid device credential"); return; }
+    } else if (pairingCodeInput) {
+      if (!validatePairingCode(pairingCodeInput, now())) { ws.close(1008, "Invalid pairing code"); return; }
+      viaPairingCode = true;
     } else if (clientToken === tokenState.token) {
       // current token — ok
     } else if (tokenState.previous && clientToken === tokenState.previous
@@ -399,6 +470,7 @@ function initMobilePreviewServer(ctx) {
       protocol: "v1",
       deviceId: device ? device.deviceId : null,
       approvalsAllowed: device ? device.approvalsAllowed !== false : false,
+      viaPairingCode,
     });
 
     // Pending rotation rotates as soon as a current-token holder appears.
@@ -481,6 +553,9 @@ function initMobilePreviewServer(ctx) {
         catch { send(ws, "pair_error", { message: "registration failed" }); return; }
         meta.deviceId = entry.deviceId;
         meta.approvalsAllowed = entry.approvalsAllowed !== false;
+        // A code is a one-time bootstrap: consume it the moment it produces a
+        // durable credential so a sniffed code can't be replayed to pair again.
+        if (meta.viaPairingCode) { freshPairingCode(now()); meta.viaPairingCode = false; }
         send(ws, "paired", { deviceId: entry.deviceId, secret: entry.secret, label: entry.label });
         return;
       }
@@ -928,6 +1003,8 @@ function initMobilePreviewServer(ctx) {
     getPort: () => activePort,
     getHttpsPort: () => httpsPort,
     getToken: () => tokenState.token,
+    getPairingCode: () => currentPairingCode(now()),
+    regeneratePairingCode: () => freshPairingCode(now()),
     regenerateToken,
     resetMobileAccess,
     getApprovalTransport,

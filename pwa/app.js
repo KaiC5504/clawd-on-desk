@@ -67,6 +67,13 @@
     pair_hint:          { zh: "配对后即使令牌轮换也无需重连", en: "Once paired, the device stays connected across token rotation" },
     notif_error:        { zh: "开启推送失败，请重试", en: "Couldn't enable notifications — please try again" },
     focus_sent:         { zh: "已发送聚焦请求", en: "Focus request sent" },
+    pair_enter_title:   { zh: "配对此设备", en: "Pair this device" },
+    pair_enter_hint:    { zh: "输入桌面端「设置 → 移动端」中显示的配对码。", en: "Enter the code shown on the desktop (Settings → Mobile)." },
+    code_connect:       { zh: "连接", en: "Connect" },
+    code_invalid:       { zh: "配对码格式不正确，请检查这 8 位字符。", en: "That code doesn't look right — check the 8 characters." },
+    code_rejected:      { zh: "配对码无效或已过期，请在桌面端获取新的配对码。", en: "Code rejected or expired — get a fresh one on the desktop." },
+    pair_cta_settings:  { zh: "未配对 — 请前往设置配对", en: "Not paired — pair in Settings" },
+    pair_go_settings:   { zh: "前往设置", en: "Go to Settings" },
   };
   function t(key) {
     var e = I18N[key];
@@ -83,6 +90,18 @@
 
   function icon(name) {
     return (typeof ICONS !== "undefined" && ICONS[name]) || "";
+  }
+
+  // Pairing code is Crockford base32 (no I/L/O/U). Be forgiving on input: map the
+  // decode aliases (O→0, I/L→1), uppercase, and drop separators / stray chars.
+  var CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+  function normalizeCode(str) {
+    var aliased = String(str || "").toUpperCase().replace(/O/g, "0").replace(/[IL]/g, "1");
+    var out = "";
+    for (var i = 0; i < aliased.length; i++) {
+      if (CODE_ALPHABET.indexOf(aliased[i]) !== -1) out += aliased[i];
+    }
+    return out;
   }
 
   function shortPath(p) {
@@ -208,11 +227,13 @@
       this.reconnectTimer = null; this.state = "disconnected";
       this.retryCount = 0;
       this.onStateChange = null; this.onMessage = null; this.onDisconnected = null;
-      this.onOpen = null;
+      this.onOpen = null; this.onNeedsPairing = null; this.onCodeError = null;
       this._hiddenAt = 0;
       this.deviceId = this._loadDeviceId();
       this.paired = this._loadPairing();
       this._triedDurable = false;
+      this._triedCode = false;
+      this._needCode = false;
       this._bindVisibility();
     }
 
@@ -234,6 +255,19 @@
     savePairing(deviceId, secret) {
       this.paired = { deviceId: deviceId, secret: secret };
       try { localStorage.setItem("clawd-pairing", JSON.stringify(this.paired)); } catch {}
+      // The bootstrap code did its job — drop it so reconnects use the durable
+      // credential, never a stale (now-consumed) code.
+      if (this.config) this.config.code = null;
+    }
+
+    // Bootstrap pairing by typing the desktop's short code. The installed app is
+    // served by the desktop, so location gives the WS target for free — the user
+    // only supplies the code.
+    connectWithCode(code) {
+      var host = (typeof location !== "undefined") ? location.hostname : "";
+      var port = (typeof location !== "undefined") ? parseInt(location.port, 10) : 0;
+      var secure = (typeof location !== "undefined") && location.protocol === "https:";
+      this.connect({ host: host, port: port, code: code, secure: secure });
     }
 
     isPaired() { return !!(this.paired && this.paired.secret); }
@@ -256,6 +290,7 @@
 
     connect(config) {
       this.config = config;
+      this._needCode = false; // an explicit connect attempt lifts the code-entry suspension
       this.retryCount = 0;
       this.reconnectDelay = 1000;
       clearTimeout(this.reconnectTimer);
@@ -271,15 +306,22 @@
         old.onopen = old.onmessage = old.onclose = old.onerror = null;
         try { old.close(); } catch {}
       }
-      // Durable connect (deviceId+secret) survives token rotation; fall back to
-      // the one-time token when we have no pairing yet (or a durable connect was
-      // just rejected with 1008 and a token is still available to re-pair).
+      // Auth precedence: durable per-device credential (survives token rotation)
+      // → a typed pairing code (camera-free bootstrap) → the one-time URL token.
+      // _forceToken skips durable after a rejected durable connect so we can
+      // re-bootstrap from whatever credential is still on hand.
       var auth;
       if (this.isPaired() && !this._forceToken) {
         this._triedDurable = true;
+        this._triedCode = false;
         auth = "deviceId=" + encodeURIComponent(this.paired.deviceId) + "&secret=" + encodeURIComponent(this.paired.secret);
+      } else if (this.config.code) {
+        this._triedDurable = false;
+        this._triedCode = true;
+        auth = "code=" + encodeURIComponent(this.config.code);
       } else {
         this._triedDurable = false;
+        this._triedCode = false;
         auth = "token=" + encodeURIComponent(this.config.token || "");
       }
       // An https-served page can only open a wss socket (ws:// is blocked as mixed
@@ -302,8 +344,9 @@
         for (var i = 0; i < persisted.length; i++) { persisted[i].remove(); }
         // v2 unlocks approval/detail traffic; must be sent every open.
         self.send({ type: "client_hello", protocol: "v2" });
-        // First-time pairing: only over a token-authed connection.
-        if (!self.isPaired() && self.config.token) {
+        // First-time pairing rides any bootstrap credential (URL token or typed
+        // code); a durable connection is already paired.
+        if (!self.isPaired() && (self.config.token || self.config.code)) {
           self.send({ type: "pair", deviceId: self.deviceId, label: self._deviceLabel() });
         }
         if (self.onOpen) self.onOpen();
@@ -320,14 +363,33 @@
       socket.onclose = function(event) {
         if (socket !== self.ws) return; // stale socket — ignore
         if (event.code === 1008) {
-          // A rejected durable connect: drop the stale pairing and re-pair over
-          // the token if one is still present, otherwise surface auth failure.
-          if (self._triedDurable && self.config.token) {
-            log("Durable auth rejected, re-pairing with token");
+          // A rejected durable connect means the device was revoked (or the
+          // registry was reset). Drop the stale pairing; re-bootstrap if a
+          // token/code is still on hand, else fall back to the code-entry UI.
+          if (self._triedDurable) {
             self.paired = null;
             try { localStorage.removeItem("clawd-pairing"); } catch {}
-            self._forceToken = true;
-            self._doConnect();
+            if (self.config.token || self.config.code) {
+              log("Durable auth rejected, re-pairing");
+              self._forceToken = true;
+              self._doConnect();
+              return;
+            }
+            // Revoked with nothing left to bootstrap from — park on the
+            // code-entry screen and stop auto-reconnecting until a code arrives.
+            self._needCode = true;
+            self._setState("disconnected"); log("Device unpaired on the desktop — pair again with a code");
+            if (self.onNeedsPairing) self.onNeedsPairing();
+            return;
+          }
+          // A rejected code: invalid or expired. Drop the dead code and suspend
+          // auto-reconnect (otherwise every foreground would retry it) until the
+          // user submits a fresh one.
+          if (self._triedCode) {
+            self.config.code = null;
+            self._needCode = true;
+            self._setState("disconnected"); log("Pairing code rejected or expired");
+            if (self.onCodeError) self.onCodeError();
             return;
           }
           self._setState("auth_failed"); log("Auth failed"); showToast("Token 已过期，请重新连接", "error"); return;
@@ -384,6 +446,9 @@
           return;
         }
         if (!self.config) return;
+        // Parked on the code-entry screen with no usable credential — don't spam
+        // doomed connects on every foreground; wait for a fresh code.
+        if (self._needCode) return;
         var hiddenFor = self._hiddenAt ? Date.now() - self._hiddenAt : 0;
         // Short tab switch: trust OPEN. Background > 30s: force reconnect (zombie guard)
         if (hiddenFor < 30000 && self.ws && self.ws.readyState === WebSocket.OPEN) return;
@@ -399,7 +464,7 @@
   // === SessionRenderer ===
 
   class SessionRenderer {
-    constructor(container) { this.container = container; this.sessions = new Map(); this.staleTimer = null; this.expandedSet = new Set(); this.onSelect = null; this._startTimerUpdater(); }
+    constructor(container) { this.container = container; this.sessions = new Map(); this.staleTimer = null; this.expandedSet = new Set(); this.onSelect = null; this.unpaired = false; this.onPair = null; this._startTimerUpdater(); }
 
     updateFromSnapshot(sessions) {
       this.sessions.clear();
@@ -434,6 +499,14 @@
       });
 
       if (entries.length === 0) {
+        if (this.unpaired) {
+          this.container.innerHTML = '<div class="empty-state"><div class="empty-icon">' + icon("paw") + '</div>' +
+            '<div class="empty-text">' + esc(t("pair_cta_settings")) + '</div>' +
+            '<button class="empty-action" id="btn-go-settings">' + esc(t("pair_go_settings")) + '</button></div>';
+          var goBtn = this.container.querySelector("#btn-go-settings");
+          if (goBtn) goBtn.addEventListener("click", function() { if (self.onPair) self.onPair(); });
+          return;
+        }
         this.container.innerHTML = '<div class="empty-state"><div class="empty-icon">' + icon("paw") + '</div>' +
           '<div class="empty-text">连接桌面端开始监控</div><div class="empty-hint">前往设置页配置连接</div></div>';
         return;
@@ -532,7 +605,7 @@
   // === SettingsRenderer ===
 
   class SettingsRenderer {
-    constructor(container) { this.container = container; }
+    constructor(container) { this.container = container; this.onSubmitCode = null; this.codeError = null; }
 
     render(connection, push) {
       var html = '';
@@ -548,11 +621,15 @@
       if (connection.config) html += '<span class="conn-status-addr">' + esc(connection.config.host) + ':' + connection.config.port + '</span>';
       html += '</div>';
 
-      // Pairing status
+      // Pairing status — paired shows a hint; unpaired shows the code-entry form.
       var paired = connection.isPaired();
       html += '<div class="settings-row"><span class="settings-label">' + esc(t("pair_section")) + '</span>';
       html += '<span class="settings-value">' + esc(paired ? t("pair_paired") : t("pair_unpaired")) + '</span></div>';
-      html += '<div class="settings-hint">' + esc(t("pair_hint")) + '</div>';
+      if (paired) {
+        html += '<div class="settings-hint">' + esc(t("pair_hint")) + '</div>';
+      } else {
+        html += this._renderCodeEntry();
+      }
       html += '</div>';
 
       // Notifications (only meaningful for a paired device)
@@ -571,6 +648,8 @@
       html += '</div>';
 
       this.container.innerHTML = html;
+
+      if (!paired) this._bindCodeEntry();
 
       // Render buffered log lines
       var logEl = document.getElementById("settings-log-content");
@@ -610,6 +689,72 @@
           if (logBody.classList.contains("open")) logBody.scrollTop = logBody.scrollHeight;
         });
       }
+    }
+
+    _renderCodeEntry() {
+      var boxes = "";
+      for (var i = 0; i < 8; i++) {
+        if (i === 4) boxes += '<span class="code-sep">&middot;</span>';
+        boxes += '<input class="code-box" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="1" data-idx="' + i + '" />';
+      }
+      var html = '<div class="pair-enter">';
+      html += '<div class="pair-enter-title">' + esc(t("pair_enter_title")) + '</div>';
+      html += '<div class="code-group">' + boxes + '</div>';
+      html += '<div class="code-error" id="code-error">' + (this.codeError ? esc(this.codeError) : "") + '</div>';
+      html += '<button class="settings-action-btn off" id="btn-code-connect">' + esc(t("code_connect")) + '</button>';
+      html += '<div class="settings-hint">' + esc(t("pair_enter_hint")) + '</div>';
+      html += '</div>';
+      return html;
+    }
+
+    _bindCodeEntry() {
+      var self = this;
+      var boxes = Array.prototype.slice.call(this.container.querySelectorAll(".code-box"));
+      if (!boxes.length) return;
+
+      function collect() {
+        var s = "";
+        for (var i = 0; i < boxes.length; i++) s += boxes[i].value;
+        return s;
+      }
+      function showError(msg) {
+        self.codeError = msg;
+        var el = document.getElementById("code-error");
+        if (el) el.textContent = msg || "";
+      }
+      function submit() {
+        var code = normalizeCode(collect());
+        if (code.length !== 8) { showError(t("code_invalid")); return; }
+        showError("");
+        if (self.onSubmitCode) self.onSubmitCode(code);
+      }
+
+      boxes.forEach(function(box, idx) {
+        box.addEventListener("input", function() {
+          var v = normalizeCode(box.value);
+          box.value = v.slice(-1); // keep only the last valid char
+          box.classList.toggle("filled", !!box.value);
+          if (box.value && idx < boxes.length - 1) boxes[idx + 1].focus();
+          if (normalizeCode(collect()).length === 8) submit();
+        });
+        box.addEventListener("keydown", function(e) {
+          if (e.key === "Backspace" && !box.value && idx > 0) boxes[idx - 1].focus();
+        });
+        box.addEventListener("paste", function(e) {
+          e.preventDefault();
+          var src = (e.clipboardData || window.clipboardData);
+          var code = normalizeCode(src ? src.getData("text") : "");
+          for (var i = 0; i < boxes.length; i++) {
+            boxes[i].value = code[i] || "";
+            boxes[i].classList.toggle("filled", !!boxes[i].value);
+          }
+          boxes[Math.min(code.length, boxes.length - 1)].focus();
+          if (normalizeCode(collect()).length === 8) submit();
+        });
+      });
+
+      var connectBtn = document.getElementById("btn-code-connect");
+      if (connectBtn) connectBtn.addEventListener("click", submit);
     }
   }
 
@@ -940,6 +1085,14 @@
       if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
     }
 
+    _locationTarget() {
+      if (typeof location === "undefined") return null;
+      var host = location.hostname;
+      var port = parseInt(location.port, 10);
+      if (!host || !port) return null;
+      return { host: host, port: port, secure: location.protocol === "https:" };
+    }
+
     _autoConnect() {
       var params = new URLSearchParams(window.location.search);
       var urlHost = params.get("host");
@@ -947,21 +1100,37 @@
       var urlToken = params.get("token");
       var urlSecure = params.get("secure") === "1" || window.location.protocol === "https:";
       var hasUrl = !!(urlHost && urlPort && urlToken);
-      var history = this.connection.getHistory();
-      var stored = history.length > 0 ? history[0] : null;
+      var stored = this.connection.getHistory()[0] || null;
 
-      // A stored connection wins over a token still sitting in the launch URL.
-      // This is what makes the iOS home-screen (standalone) app work: iOS gives it
-      // its own empty storage and a fixed launch URL, so the FIRST launch bootstraps
-      // from the URL token, but every later launch — and a paired device's durable
-      // credential — reconnects from storage. Honor the URL only when it points
-      // somewhere new (a fresh scan, or a different desktop) so a lingering token
-      // can't clobber a rotated one in history.
+      // A paired device reconnects with its durable credential. The installed app
+      // is served by the desktop, so the live `location` is the most reliable WS
+      // target — prefer it over possibly-stale stored host/port, then the URL.
+      // This is what finally makes the iOS home-screen (standalone) app reconnect:
+      // it has no URL token and its own empty storage, but it IS served from the
+      // desktop, and the durable credential lives in that same storage.
+      if (this.connection.isPaired()) {
+        var target = this._locationTarget() || stored
+          || (hasUrl ? { host: urlHost, port: parseInt(urlPort, 10), secure: urlSecure } : null);
+        if (target) { this.connection.connect(target); return; }
+      }
+
+      // A URL token wins only when it points somewhere new (a fresh scan, or a
+      // different desktop) so a lingering token can't clobber a rotated one.
       var urlIsNew = hasUrl && (!stored || stored.host !== urlHost || String(stored.port) !== String(urlPort));
-      if (stored && !urlIsNew) { this.connection.connect(stored); return; }
+      if (stored && stored.token && !urlIsNew) { this.connection.connect(stored); return; }
       if (hasUrl) { this.connection.connect({ host: urlHost, port: parseInt(urlPort, 10), token: urlToken, secure: urlSecure }); return; }
-      if (stored) { this.connection.connect(stored); return; }
-      // Nothing stored and no token — the connection status shows "disconnected".
+      if (stored && stored.token) { this.connection.connect(stored); return; }
+
+      // No durable credential and no URL token — the installed app's normal
+      // first-run state. Surface the code-entry UI instead of sitting dark.
+      this.setUnpaired(true);
+    }
+
+    setUnpaired(flag) {
+      this._needsPairing = !!flag;
+      this.renderer.unpaired = !!flag;
+      this.renderer.render();
+      if (this.activeTab === "settings") this._renderSettings();
     }
 
     _bindNav() {
@@ -997,7 +1166,19 @@
       this.connection.onOpen = function() {
         // A paired device may approve once reconnected; a snapshot will refine this.
         self.approvals.setApproveContext(self.connection.isPaired(), self.connection.isSecureConnection());
+        if (self.connection.isPaired()) self.setUnpaired(false);
       };
+      this.connection.onNeedsPairing = function() { self.setUnpaired(true); };
+      this.connection.onCodeError = function() {
+        self.settingsRenderer.codeError = t("code_rejected");
+        self.setUnpaired(true);
+        showToast(t("code_rejected"), "error");
+      };
+      this.settingsRenderer.onSubmitCode = function(code) {
+        self.settingsRenderer.codeError = null;
+        self.connection.connectWithCode(code);
+      };
+      this.renderer.onPair = function() { self._switchTab("settings"); };
       this.connection.onMessage = function(msg) {
         if (msg.type === "snapshot") { self.renderer.updateFromSnapshot(msg.sessions || {}); log("Snapshot: " + Object.keys(msg.sessions || {}).length + " sessions"); }
         else if (msg.type === "state") { self.renderer.updateState(msg.sessionId, msg.data); self.notifier.onStateChange(msg.sessionId, msg.data); }
@@ -1015,9 +1196,10 @@
         }
         else if (msg.type === "paired") {
           self.connection.savePairing(msg.deviceId, msg.secret);
+          self.settingsRenderer.codeError = null;
           self.approvals.setApproveContext(true, self.connection.isSecureConnection());
           log("Paired as " + msg.deviceId);
-          if (self.activeTab === "settings") self._renderSettings();
+          self.setUnpaired(false);
         }
         else if (msg.type === "pair_error") { log("Pair error: " + (msg.message || "")); }
         else if (msg.type === "approval_snapshot") {

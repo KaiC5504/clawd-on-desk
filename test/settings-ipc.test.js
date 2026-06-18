@@ -249,7 +249,7 @@ test("mobile connection info reports starting until the LAN bridge has a port", 
   runtime.dispose();
 });
 
-test("mobile connection info returns a ready pair URL only when port and token are available", async () => {
+test("mobile connection info returns port, token, and LAN IP when ready", async () => {
   const token = "0123456789abcdef0123456789abcdef";
   const { ipcMain, runtime } = createHarness({
     getLanWsServer: () => ({
@@ -263,9 +263,9 @@ test("mobile connection info returns a ready pair URL only when port and token a
   assert.strictEqual(result.status, "ok");
   assert.strictEqual(result.port, 23334);
   assert.strictEqual(result.token, token);
-  assert.ok(result.pairUrl.includes("port=23334"));
-  assert.ok(result.pairUrl.includes(`token=${token}`));
-  assert.ok(!result.pairUrl.includes("port=null"));
+  assert.strictEqual(typeof result.lanIp, "string");
+  // The token-carrying pair URL was removed — bootstrapping is the typed code.
+  assert.ok(!("pairUrl" in result));
   runtime.dispose();
 });
 
@@ -762,6 +762,18 @@ function makeFakeLanServer(overrides = {}) {
       calls.push(["setDeviceApprovalsAllowed", deviceId, allowed]);
       return overrides.setApprovalsResult === undefined ? true : overrides.setApprovalsResult;
     },
+    getPairingCode: () => {
+      calls.push(["getPairingCode"]);
+      return overrides.pairingCode === undefined
+        ? { code: "ABCD2345", expiresAt: 1700000600000 }
+        : overrides.pairingCode;
+    },
+    regeneratePairingCode: () => {
+      calls.push(["regeneratePairingCode"]);
+      return overrides.regeneratedCode === undefined
+        ? { code: "WXYZ6789", expiresAt: 1700000900000 }
+        : overrides.regeneratedCode;
+    },
     getLocalIP: () => (overrides.localIp === undefined ? "192.168.1.50" : overrides.localIp),
   };
   if (overrides.omitGetLocalIP) delete server.getLocalIP;
@@ -869,6 +881,8 @@ test("v2 mobile handlers return a safe not-available object when the LAN bridge 
     notAvailable
   );
   assert.deepStrictEqual(await ipcMain.invoke("settings:mobile-pairing-qr"), notAvailable);
+  assert.deepStrictEqual(await ipcMain.invoke("settings:mobile-pairing-code"), notAvailable);
+  assert.deepStrictEqual(await ipcMain.invoke("settings:regenerate-mobile-pairing-code"), notAvailable);
   runtime.dispose();
 });
 
@@ -891,15 +905,15 @@ test("mobile-pairing-qr generates real http QR codes when HTTPS is not ready", a
     // Without HTTPS the primary (host) variant also falls back to the raw IP.
     assert.strictEqual(url.hostname, "192.168.1.50");
     assert.strictEqual(url.port, "23334");
-    assert.strictEqual(url.searchParams.get("port"), "23334");
-    assert.strictEqual(url.searchParams.get("token"), FAKE_TOKEN);
-    assert.strictEqual(url.searchParams.get("host"), "192.168.1.50");
-    assert.strictEqual(url.searchParams.get("secure"), null);
+    assert.strictEqual(url.pathname, "/mobile/");
+    // Token-free: the QR only opens the app (scan → Add to Home Screen); no
+    // credential rides in the URL.
+    assert.strictEqual(url.search, "");
   }
   runtime.dispose();
 });
 
-test("mobile-pairing-qr uses clawd.local + secure=1 + https port when HTTPS is ready", async () => {
+test("mobile-pairing-qr uses clawd.local + https port when HTTPS is ready", async () => {
   const { server } = makeFakeLanServer({
     httpsInfo: { httpsReady: true, host: "clawd.local", httpsPort: 23335, lanIp: "192.168.1.50" },
     localIp: "192.168.1.50",
@@ -916,21 +930,55 @@ test("mobile-pairing-qr uses clawd.local + secure=1 + https port when HTTPS is r
   assert.strictEqual(hostUrl.protocol, "https:");
   assert.strictEqual(hostUrl.hostname, "clawd.local");
   assert.strictEqual(hostUrl.port, "23335");
-  assert.strictEqual(hostUrl.searchParams.get("port"), "23335");
-  assert.strictEqual(hostUrl.searchParams.get("token"), FAKE_TOKEN);
-  assert.strictEqual(hostUrl.searchParams.get("host"), "clawd.local");
-  assert.strictEqual(hostUrl.searchParams.get("secure"), "1");
+  assert.strictEqual(hostUrl.pathname, "/mobile/");
+  assert.strictEqual(hostUrl.search, "");
 
   decodeQrPayload(result.ip.qr);
   const ipUrl = new URL(result.ip.url);
   assert.strictEqual(ipUrl.protocol, "https:");
   assert.strictEqual(ipUrl.hostname, "192.168.1.50");
   assert.strictEqual(ipUrl.port, "23335");
-  assert.strictEqual(ipUrl.searchParams.get("secure"), "1");
+  assert.strictEqual(ipUrl.pathname, "/mobile/");
+  assert.strictEqual(ipUrl.search, "");
   runtime.dispose();
 });
 
-test("mobile-pairing-qr reports starting until the LAN bridge has a port and token", async () => {
+test("mobile-pairing-code delegates to the LAN bridge and returns the code + expiry", async () => {
+  const { server, calls } = makeFakeLanServer();
+  const { ipcMain, runtime } = createHarness({ getLanWsServer: () => server });
+
+  const result = await ipcMain.invoke("settings:mobile-pairing-code");
+  assert.strictEqual(result.status, "ok");
+  assert.strictEqual(result.code, "ABCD2345");
+  assert.strictEqual(result.expiresAt, 1700000600000);
+  assert.ok(calls.some((c) => c[0] === "getPairingCode"));
+  runtime.dispose();
+});
+
+test("mobile-pairing-code reports starting until the LAN bridge has a port", async () => {
+  const { server } = makeFakeLanServer({ port: null });
+  const { ipcMain, runtime } = createHarness({ getLanWsServer: () => server });
+
+  assert.deepStrictEqual(await ipcMain.invoke("settings:mobile-pairing-code"), {
+    status: "starting",
+    message: "LAN bridge is starting",
+  });
+  runtime.dispose();
+});
+
+test("regenerate-mobile-pairing-code delegates and returns the fresh code", async () => {
+  const { server, calls } = makeFakeLanServer();
+  const { ipcMain, runtime } = createHarness({ getLanWsServer: () => server });
+
+  const result = await ipcMain.invoke("settings:regenerate-mobile-pairing-code");
+  assert.strictEqual(result.status, "ok");
+  assert.strictEqual(result.code, "WXYZ6789");
+  assert.strictEqual(result.expiresAt, 1700000900000);
+  assert.ok(calls.some((c) => c[0] === "regeneratePairingCode"));
+  runtime.dispose();
+});
+
+test("mobile-pairing-qr reports starting until the LAN bridge has a port", async () => {
   const { server } = makeFakeLanServer({ port: null });
   const { ipcMain, runtime } = createHarness({ getLanWsServer: () => server });
 

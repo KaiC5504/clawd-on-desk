@@ -176,6 +176,31 @@ body { display: flex; flex-direction: column; height: 100%; }
 .settings-action-btn.off { background: var(--bg); color: var(--text); border: 1px solid var(--card-border); }
 .settings-hint { font-size: 12px; color: var(--faint); margin-top: 8px; line-height: 16px; }
 
+/* === Pairing code entry (4 + 4 OTP boxes) === */
+.pair-enter { margin-top: 12px; }
+.pair-enter-title { font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 12px; }
+.code-group { display: flex; align-items: center; justify-content: center; gap: 7px; margin-bottom: 10px; }
+.code-box {
+  width: 32px; height: 44px; text-align: center;
+  background: var(--bg); border: 1px solid var(--card-border); border-radius: 8px;
+  color: var(--text); font-size: 20px; font-weight: 600;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  text-transform: uppercase; outline: none; caret-color: var(--accent);
+  transition: border-color 0.15s;
+}
+.code-box:focus { border-color: var(--accent); }
+.code-box.filled { border-color: var(--accent); }
+.code-sep { color: var(--faint); font-weight: 700; padding: 0 2px; }
+.code-error { font-size: 12px; color: var(--red); min-height: 16px; margin-bottom: 8px; text-align: center; }
+
+/* Sessions empty-state CTA (unpaired → pair in Settings) */
+.empty-action {
+  margin-top: 4px; padding: 9px 18px; border: none; border-radius: 8px;
+  background: var(--accent); color: #fff; font-size: 13px; font-weight: 600;
+  cursor: pointer; transition: transform 0.1s;
+}
+.empty-action:active { transform: scale(0.97); }
+
 /* === Bottom Navigation === */
 #bottom-nav {
   flex-shrink: 0;

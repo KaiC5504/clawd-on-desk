@@ -125,6 +125,8 @@ contextBridge.exposeInMainWorld("settingsAPI", {
   setMobileDeviceApprovals: (deviceId, allowed) =>
     ipcRenderer.invoke("settings:set-mobile-device-approvals", { deviceId, allowed }),
   getMobilePairingQr: () => ipcRenderer.invoke("settings:mobile-pairing-qr"),
+  getMobilePairingCode: () => ipcRenderer.invoke("settings:mobile-pairing-code"),
+  regenerateMobilePairingCode: () => ipcRenderer.invoke("settings:regenerate-mobile-pairing-code"),
   onChanged: (cb) => {
     if (typeof cb === "function") listeners.add(cb);
   },

@@ -14,8 +14,10 @@
   let v2Container = null;
   let httpsInfoContainer = null;
   let devicesContainer = null;
+  let devicesTitleEl = null;
   let pushContainer = null;
   let qrContainer = null;
+  let pairingCodeContainer = null;
   let qrVisible = false;
   let httpsPollTimer = null;
   let changeListenerRegistered = false;
@@ -99,12 +101,6 @@
       html += `<button class="mobile-copy-btn" data-copy="${String(info.port)}">Copy</button></div>`;
       html += `<div class="mobile-conn-row"><span class="mobile-conn-label">Token</span><span class="mobile-conn-value mobile-token">${escapeHtml(info.token)}</span>`;
       html += `<button class="mobile-copy-btn" data-copy="${escapeHtml(info.token)}">Copy</button></div>`;
-
-      // Pair URL
-      if (info.pairUrl) {
-        html += `<div class="mobile-conn-row"><span class="mobile-conn-label">URL</span><span class="mobile-conn-value mobile-pair-url">${escapeHtml(info.pairUrl)}</span>`;
-        html += `<button class="mobile-copy-btn" data-copy="${escapeHtml(info.pairUrl)}">Copy</button></div>`;
-      }
 
       html += '</div>';
 
@@ -327,6 +323,48 @@
     });
   }
 
+  function renderPairingCode(attempt = 0) {
+    if (!pairingCodeContainer) return;
+    const container = pairingCodeContainer;
+    container.innerHTML = `<p class="mobile-info-loading">${escapeHtml(t("mobilePairCodeLoading"))}</p>`;
+
+    if (!window.settingsAPI || typeof window.settingsAPI.getMobilePairingCode !== "function") return;
+    window.settingsAPI.getMobilePairingCode().then((res) => {
+      if (!container.parentNode) return;
+      if (res && res.status === "starting" && attempt < MOBILE_INFO_MAX_RETRIES) {
+        setTimeout(() => { if (container.parentNode) renderPairingCode(attempt + 1); }, MOBILE_INFO_RETRY_MS);
+        return;
+      }
+      if (!res || res.status !== "ok" || typeof res.code !== "string" || res.code.length < 8) {
+        container.innerHTML = `<p class="mobile-info-error">${escapeHtml(t("mobilePairCodeError"))}</p>`;
+        return;
+      }
+      const first = escapeHtml(res.code.slice(0, 4));
+      const second = escapeHtml(res.code.slice(4, 8));
+      let html = `<div class="mobile-paircode">`;
+      html += `<span class="mobile-paircode-seg">${first}</span>`;
+      html += `<span class="mobile-paircode-dash">&middot;</span>`;
+      html += `<span class="mobile-paircode-seg">${second}</span>`;
+      html += `</div>`;
+      html += `<p class="mobile-paircode-instructions">${escapeHtml(t("mobilePairCodeInstructions"))}</p>`;
+      html += `<p class="mobile-paircode-hint">${escapeHtml(t("mobilePairCodeHint"))}</p>`;
+      html += `<button class="mobile-action-btn" id="mobile-newcode-btn">${escapeHtml(t("mobilePairNewCode"))}</button>`;
+      container.innerHTML = html;
+
+      const newBtn = container.querySelector("#mobile-newcode-btn");
+      if (newBtn) {
+        newBtn.addEventListener("click", () => {
+          if (!window.settingsAPI || typeof window.settingsAPI.regenerateMobilePairingCode !== "function") return;
+          window.settingsAPI.regenerateMobilePairingCode().then(() => renderPairingCode()).catch(() => {});
+        });
+      }
+    }).catch(() => {
+      if (container.parentNode) {
+        container.innerHTML = `<p class="mobile-info-error">${escapeHtml(t("mobilePairCodeError"))}</p>`;
+      }
+    });
+  }
+
   function renderDevices() {
     if (!devicesContainer) return;
     const container = devicesContainer;
@@ -338,6 +376,9 @@
       if (!res || res.status !== "ok" || !Array.isArray(res.devices)) {
         container.innerHTML = `<p class="mobile-info-error">${escapeHtml(t("mobileDevicesError"))}</p>`;
         return;
+      }
+      if (devicesTitleEl) {
+        devicesTitleEl.textContent = `${t("mobileDevicesTitle")} (${res.devices.length})`;
       }
       if (res.devices.length === 0) {
         container.innerHTML = `<p class="mobile-info-loading">${escapeHtml(t("mobileDevicesEmpty"))}</p>`;
@@ -464,12 +505,25 @@
     v2Container.appendChild(httpsInfoContainer);
     renderHttpsInfo();
 
-    // 4. QR pairing wizard
+    // 4. Pairing code (primary, camera-free pairing)
+    const codeSection = document.createElement("div");
+    codeSection.className = "mobile-subsection";
+    const codeTitle = document.createElement("h4");
+    codeTitle.className = "mobile-subsection-title";
+    codeTitle.textContent = t("mobilePairTitle");
+    codeSection.appendChild(codeTitle);
+    pairingCodeContainer = document.createElement("div");
+    pairingCodeContainer.className = "mobile-paircode-container";
+    codeSection.appendChild(pairingCodeContainer);
+    v2Container.appendChild(codeSection);
+    renderPairingCode();
+
+    // 5. Install QR — token-free "scan to open the app, then Add to Home Screen"
     const pairSection = document.createElement("div");
     pairSection.className = "mobile-subsection";
     const pairTitle = document.createElement("h4");
     pairTitle.className = "mobile-subsection-title";
-    pairTitle.textContent = t("mobilePairTitle");
+    pairTitle.textContent = t("mobileInstallTitle");
     pairSection.appendChild(pairTitle);
     const qrBtn = document.createElement("button");
     qrBtn.className = "mobile-action-btn";
@@ -486,12 +540,13 @@
     v2Container.appendChild(pairSection);
     renderQr();
 
-    // 5. Device manager
+    // 6. Device manager
     const devSection = document.createElement("div");
     devSection.className = "mobile-subsection";
     const devTitle = document.createElement("h4");
     devTitle.className = "mobile-subsection-title";
     devTitle.textContent = t("mobileDevicesTitle");
+    devicesTitleEl = devTitle;
     devSection.appendChild(devTitle);
     devicesContainer = document.createElement("div");
     devicesContainer.className = "mobile-devices-container";
@@ -499,7 +554,7 @@
     v2Container.appendChild(devSection);
     renderDevices();
 
-    // 6. Push status
+    // 7. Push status
     const pushSection = document.createElement("div");
     pushSection.className = "mobile-subsection";
     const pushTitle = document.createElement("h4");

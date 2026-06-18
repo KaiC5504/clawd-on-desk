@@ -512,8 +512,7 @@ function registerSettingsIpc(options = {}) {
           if (lanIp !== "127.0.0.1") break;
         }
       }
-      const pairUrl = `http://${lanIp}:${port}/mobile/?host=${lanIp}&port=${port}&token=${tok}`;
-      return { status: "ok", port, token: tok, lanIp, pairUrl };
+      return { status: "ok", port, token: tok, lanIp };
     } catch (err) {
       return { status: "error", message: (err && err.message) || String(err) };
     }
@@ -615,16 +614,49 @@ function registerSettingsIpc(options = {}) {
     }
   });
 
+  // Returns the live pairing code for the phone to type (4+4 OTP boxes). The
+  // code is ephemeral and never persisted; it's the camera-free way the iOS
+  // home-screen app bootstraps its first pairing.
+  handle("settings:mobile-pairing-code", async () => {
+    try {
+      const lanWsServer = options.getLanWsServer ? options.getLanWsServer() : null;
+      if (!lanWsServer || typeof lanWsServer.getPairingCode !== "function") {
+        return { status: "error", message: "LAN bridge not available" };
+      }
+      const port = lanWsServer.getPort();
+      if (!Number.isInteger(port) || port <= 0) {
+        return { status: "starting", message: "LAN bridge is starting" };
+      }
+      const { code, expiresAt } = lanWsServer.getPairingCode();
+      return { status: "ok", code, expiresAt };
+    } catch (err) {
+      return { status: "error", message: (err && err.message) || String(err) };
+    }
+  });
+
+  handle("settings:regenerate-mobile-pairing-code", async () => {
+    try {
+      const lanWsServer = options.getLanWsServer ? options.getLanWsServer() : null;
+      if (!lanWsServer || typeof lanWsServer.regeneratePairingCode !== "function") {
+        return { status: "error", message: "LAN bridge not available" };
+      }
+      const { code, expiresAt } = lanWsServer.regeneratePairingCode();
+      return { status: "ok", code, expiresAt };
+    } catch (err) {
+      return { status: "error", message: (err && err.message) || String(err) };
+    }
+  });
+
   // QR generation must happen main-side: the sandboxed settings preload can't
-  // require app modules (incl. qrcode). Returns data-URLs the renderer drops
-  // straight into <img>.
+  // require app modules (incl. qrcode). This QR is token-free — it only opens
+  // the PWA in Safari (scan → Add to Home Screen). Pairing is done inside the
+  // installed app with the typed code above, never via a credential in the URL.
   handle("settings:mobile-pairing-qr", async () => {
     try {
       const lanWsServer = options.getLanWsServer ? options.getLanWsServer() : null;
       if (!lanWsServer) return { status: "error", message: "LAN bridge not available" };
       const port = lanWsServer.getPort();
-      const tok = lanWsServer.getToken();
-      if (!Number.isInteger(port) || port <= 0 || typeof tok !== "string" || !tok) {
+      if (!Number.isInteger(port) || port <= 0) {
         return { status: "starting", message: "LAN bridge is starting" };
       }
 
@@ -637,17 +669,13 @@ function registerSettingsIpc(options = {}) {
       const host = (httpsInfo && httpsInfo.host) || "clawd.local";
       const httpsReady = !!(httpsInfo && httpsInfo.httpsReady && httpsInfo.httpsPort);
 
+      // Prefer HTTPS so the installed app gets the secure context iOS needs for
+      // the service worker, push, and write-approval.
       const scheme = httpsReady ? "https" : "http";
       const usePort = httpsReady ? httpsInfo.httpsPort : port;
-      const secureParam = httpsReady ? "&secure=1" : "";
-      // Each QR connects to the same authority it loads from: the clawd.local
-      // variant stays DHCP-resilient (resolved via mDNS), while the raw-IP
-      // variant is the fallback for phones where .local doesn't resolve.
-      const buildUrl = (authority) =>
-        `${scheme}://${authority}:${usePort}/mobile/?host=${encodeURIComponent(authority)}` +
-        `&port=${usePort}&token=${encodeURIComponent(tok)}${secureParam}`;
-      // clawd.local is only advertised (mDNS) while HTTPS is up; without it the
-      // name won't resolve, so fall the primary QR back to the raw IP.
+      // The clawd.local variant stays DHCP-resilient (resolved via mDNS, only
+      // advertised while HTTPS is up); the raw-IP variant is the fallback.
+      const buildUrl = (authority) => `${scheme}://${authority}:${usePort}/mobile/`;
       const hostUrl = buildUrl(httpsReady ? host : lanIp);
       const ipUrl = buildUrl(lanIp);
 
