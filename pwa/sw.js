@@ -1,9 +1,10 @@
-const CACHE_NAME = "clawd-mobile-v7";
+const CACHE_NAME = "clawd-mobile-v8";
 const STATIC_ASSETS = [
   "/mobile/",
   "/mobile/index.html",
   "/mobile/style.css",
   "/mobile/icons.js",
+  "/mobile/i18n.js",
   "/mobile/app.js",
   "/mobile/manifest.json",
 ];

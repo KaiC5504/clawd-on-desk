@@ -4,31 +4,24 @@
   // === Constants ===
 
   var STATE_CONFIG = {
-    error:        { icon: "error",        color: "#ef4444", priority: 0, label: "错误" },
-    attention:    { icon: "attention",    color: "#b45309", priority: 1, label: "需要关注" },
-    working:      { icon: "working",      color: "#22c55e", priority: 2, label: "工作中" },
-    juggling:     { icon: "juggling",     color: "#22c55e", priority: 2, label: "多任务" },
-    thinking:     { icon: "thinking",     color: "#3b82f6", priority: 3, label: "思考中" },
-    notification: { icon: "notification", color: "#d97757", priority: 4, label: "通知" },
-    sweeping:     { icon: "sweeping",     color: "#71717a", priority: 5, label: "清理中" },
-    carrying:     { icon: "carrying",     color: "#71717a", priority: 5, label: "搬运中" },
-    idle:         { icon: "idle",         color: "#71717a", priority: 6, label: "空闲" },
-    sleeping:     { icon: "sleeping",     color: "#a1a1aa", priority: 7, label: "休眠" },
+    error:        { icon: "error",        color: "#ef4444", priority: 0, labelKey: "state_error" },
+    attention:    { icon: "attention",    color: "#b45309", priority: 1, labelKey: "state_attention" },
+    working:      { icon: "working",      color: "#22c55e", priority: 2, labelKey: "state_working" },
+    juggling:     { icon: "juggling",     color: "#22c55e", priority: 2, labelKey: "state_juggling" },
+    thinking:     { icon: "thinking",     color: "#3b82f6", priority: 3, labelKey: "state_thinking" },
+    notification: { icon: "notification", color: "#d97757", priority: 4, labelKey: "state_notification" },
+    sweeping:     { icon: "sweeping",     color: "#71717a", priority: 5, labelKey: "state_sweeping" },
+    carrying:     { icon: "carrying",     color: "#71717a", priority: 5, labelKey: "state_carrying" },
+    idle:         { icon: "idle",         color: "#71717a", priority: 6, labelKey: "state_idle" },
+    sleeping:     { icon: "sleeping",     color: "#a1a1aa", priority: 7, labelKey: "state_sleeping" },
   };
 
   var CONNECTION_STATES = {
-    connected:    { dot: "connected", text: "已连接", color: "#22c55e" },
-    connecting:   { dot: "connecting", text: "连接中...", color: "#b45309" },
-    reconnecting: { dot: "reconnecting", text: "重连中...", color: "#ef4444" },
-    disconnected: { dot: "", text: "", color: "#52525b" },
-    auth_failed:  { dot: "", text: "认证失败", color: "#ef4444" },
-  };
-
-  var EVENT_LABELS_CN = {
-    UserPromptSubmit: "用户输入", PreToolUse: "工具启动", PostToolUse: "工具完成",
-    PostToolUseFailure: "工具失败", Stop: "已完成", SessionStart: "会话开始",
-    SessionEnd: "会话结束", PermissionRequest: "需要权限", Notification: "通知",
-    SubagentStart: "子代理启动", SubagentStop: "子代理停止",
+    connected:    { dot: "connected", textKey: "conn_connected", color: "#22c55e" },
+    connecting:   { dot: "connecting", textKey: "conn_connecting", color: "#b45309" },
+    reconnecting: { dot: "reconnecting", textKey: "conn_reconnecting", color: "#ef4444" },
+    disconnected: { dot: "", textKey: null, color: "#52525b" },
+    auth_failed:  { dot: "", textKey: "conn_auth_failed", color: "#ef4444" },
   };
 
 
@@ -37,48 +30,10 @@
   var _logBuffer = [];
 
   // === i18n ===
-  // The shell is zh-primary; new strings carry both locales. Pick zh for any
-  // zh-* navigator language (matching the existing UI), English otherwise.
-  var LANG = (typeof navigator !== "undefined" && /^zh/i.test(navigator.language || "")) ? "zh" : "en";
-  var I18N = {
-    approval_pending:   { zh: "待处理审批", en: "Pending approvals" },
-    approval_kind:      { zh: "审批", en: "Approval" },
-    approval_allow:     { zh: "允许", en: "Allow" },
-    approval_deny:      { zh: "拒绝", en: "Deny" },
-    approval_pair_hint: { zh: "需先在设置中配对设备才能审批", en: "Pair this device in Settings to approve" },
-    approval_secure_hint: { zh: "需在桌面端启用安全连接 (HTTPS) 后才能在此设备审批", en: "Enable Secure (HTTPS) on the desktop to approve from this device" },
-    detail_context:     { zh: "上下文用量", en: "Context usage" },
-    detail_output:      { zh: "最近输出", en: "Recent output" },
-    detail_events:      { zh: "最近事件", en: "Recent events" },
-    detail_focus:       { zh: "在桌面端聚焦", en: "Focus on desktop" },
-    detail_back:        { zh: "返回", en: "Back" },
-    detail_loading:     { zh: "加载中…", en: "Loading…" },
-    notif_section:      { zh: "通知", en: "Notifications" },
-    notif_enable:       { zh: "开启推送通知", en: "Enable notifications" },
-    notif_disable:      { zh: "关闭推送通知", en: "Disable notifications" },
-    notif_hint:         { zh: "在审批请求到来时收到推送", en: "Get a push when an approval is requested" },
-    notif_denied:       { zh: "通知权限被拒绝，请在系统设置中开启", en: "Notification permission denied — enable it in system settings" },
-    notif_unsupported:  { zh: "此设备不支持推送通知", en: "Push notifications are not supported on this device" },
-    notif_enabled_toast:  { zh: "已开启推送", en: "Notifications enabled" },
-    notif_disabled_toast: { zh: "已关闭推送", en: "Notifications disabled" },
-    pair_section:       { zh: "设备配对", en: "Device pairing" },
-    pair_paired:        { zh: "已配对", en: "Paired" },
-    pair_unpaired:      { zh: "未配对", en: "Not paired" },
-    pair_hint:          { zh: "配对后即使令牌轮换也无需重连", en: "Once paired, the device stays connected across token rotation" },
-    notif_error:        { zh: "开启推送失败，请重试", en: "Couldn't enable notifications — please try again" },
-    focus_sent:         { zh: "已发送聚焦请求", en: "Focus request sent" },
-    pair_enter_title:   { zh: "配对此设备", en: "Pair this device" },
-    pair_enter_hint:    { zh: "输入桌面端「设置 → 移动端」中显示的配对码。", en: "Enter the code shown on the desktop (Settings → Mobile)." },
-    code_connect:       { zh: "连接", en: "Connect" },
-    code_invalid:       { zh: "配对码格式不正确，请检查这 8 位字符。", en: "That code doesn't look right — check the 8 characters." },
-    code_rejected:      { zh: "配对码无效或已过期，请在桌面端获取新的配对码。", en: "Code rejected or expired — get a fresh one on the desktop." },
-    pair_cta_settings:  { zh: "未配对 — 请前往设置配对", en: "Not paired — pair in Settings" },
-    pair_go_settings:   { zh: "前往设置", en: "Go to Settings" },
-  };
-  function t(key) {
-    var e = I18N[key];
-    return e ? (e[LANG] || e.en) : key;
-  }
+  // Strings + language resolution live in pwa/i18n.js (window.CLAWD_I18N). t() is
+  // bound here; the active language is chosen during App init and via the Settings
+  // language picker, with a full re-render on change.
+  function t(key, vars) { return CLAWD_I18N.t(key, vars); }
 
   // === Utilities ===
 
@@ -113,28 +68,21 @@
   function formatAgo(ts) {
     if (!ts) return "";
     var sec = Math.floor((Date.now() - ts) / 1000);
-    if (sec < 5) return "刚刚";
-    if (sec < 60) return sec + "秒前";
-    if (sec < 3600) return Math.floor(sec / 60) + "分钟前";
-    return Math.floor(sec / 3600) + "小时前";
+    if (sec < 5) return t("time_just_now");
+    if (sec < 60) return t("time_sec_ago", { n: sec });
+    if (sec < 3600) return t("time_min_ago", { n: Math.floor(sec / 60) });
+    return t("time_hr_ago", { n: Math.floor(sec / 3600) });
   }
 
+  // Labels live in the i18n dictionary (event_*); EVENT_ICONS lives in icons.js.
   function eventLabel(eventName) {
-    return EVENT_LABELS_CN[eventName] || (typeof EVENT_LABELS !== "undefined" && EVENT_LABELS[eventName]) || eventName || "";
+    var key = "event_" + eventName;
+    if (CLAWD_I18N.I18N[key]) return t(key);
+    return (typeof EVENT_LABELS !== "undefined" && EVENT_LABELS[eventName]) || eventName || "";
   }
-
-  var EVENT_ICONS = {
-    UserPromptSubmit: "💬", PreToolUse: "⚙️", PostToolUse: "✅",
-    PostToolUseFailure: "❌", Stop: "🏁", StopFailure: "❌",
-    SessionStart: "▶️", SessionEnd: "⏹️",
-    PermissionRequest: "🔒", Notification: "🔔",
-    SubagentStart: "🔀", SubagentStop: "🔀",
-    AfterAgent: "✅", ApiError: "❌",
-    Elicitation: "❓", WorktreeCreate: "🌿",
-  };
 
   function eventIcon(eventName) {
-    return EVENT_ICONS[eventName] || "●";
+    return icon((typeof EVENT_ICONS !== "undefined" && EVENT_ICONS[eventName]) || "dot");
   }
 
   function log(msg) {
@@ -162,7 +110,7 @@
     if (persist) {
       var close = document.createElement("span");
       close.className = "toast-close";
-      close.textContent = "✕";
+      close.innerHTML = icon("close");
       close.onclick = function() { toast.remove(); };
       toast.appendChild(close);
     }
@@ -199,9 +147,9 @@
       if (!config) return;
       var label = data.title || data.agentId || "Agent";
       if (s === "error" || s === "attention") {
-        this._notify(config.label, label + " - " + config.label, s);
+        this._notify(t(config.labelKey), label + " - " + t(config.labelKey), s);
       } else if ((prev === "working" || prev === "thinking") && s === "idle") {
-        this._notify("任务完成", label + " 已完成任务", "idle");
+        this._notify(t("notif_task_done_title"), t("notif_task_done_body", { label: label }), "idle");
       }
     }
 
@@ -338,7 +286,7 @@
       socket.onopen = function() {
         if (socket !== self.ws) return; // stale socket — ignore
         connected = true; self.retryCount = 0; self.reconnectDelay = 1000; self._forceToken = false;
-        self._setState("connected"); log("Connected"); showToast("已连接到桌面端", "success");
+        self._setState("connected"); log("Connected"); showToast(t("toast_connected"), "success");
         // Dismiss any persistent toasts (e.g. retry hint)
         var persisted = document.querySelectorAll(".toast-persist");
         for (var i = 0; i < persisted.length; i++) { persisted[i].remove(); }
@@ -392,7 +340,7 @@
             if (self.onCodeError) self.onCodeError();
             return;
           }
-          self._setState("auth_failed"); log("Auth failed"); showToast("Token 已过期，请重新连接", "error"); return;
+          self._setState("auth_failed"); log("Auth failed"); showToast(t("toast_token_expired"), "error"); return;
         }
         if (connected) log("Disconnected (code: " + event.code + ")");
         if (self.onDisconnected) self.onDisconnected();
@@ -409,7 +357,7 @@
       this._setState("reconnecting");
       // After several retries, give actionable feedback (don't stop — just inform)
       if (this.retryCount === 5) {
-        showToast("仍在重连…请检查地址、端口或桌面端是否已开启", "info", true);
+        showToast(t("toast_reconnecting"), "info", true);
       }
       var self = this;
       this.reconnectTimer = setTimeout(function() { self.reconnectDelay = Math.min(self.reconnectDelay * 2, self.maxReconnectDelay); self._doConnect(); }, this.reconnectDelay);
@@ -508,11 +456,11 @@
           return;
         }
         this.container.innerHTML = '<div class="empty-state"><div class="empty-icon">' + icon("paw") + '</div>' +
-          '<div class="empty-text">连接桌面端开始监控</div><div class="empty-hint">前往设置页配置连接</div></div>';
+          '<div class="empty-text">' + esc(t("empty_connect")) + '</div><div class="empty-hint">' + esc(t("empty_connect_hint")) + '</div></div>';
         return;
       }
 
-      var html = '<div class="section-label">活跃会话 &middot; ' + entries.length + '</div>';
+      var html = '<div class="section-label">' + esc(t("sessions_active")) + ' &middot; ' + entries.length + '</div>';
       for (var i = 0; i < entries.length; i++) html += this._renderCard(entries[i][0], entries[i][1]);
       this.container.innerHTML = html;
       this.container.querySelectorAll(".card-footer").forEach(function(el) {
@@ -548,7 +496,7 @@
       html += '<div class="card-tap" data-sid="' + sid + '">';
       html += '<div class="card-header"><div class="card-agent"><div class="agent-dot"></div>';
       html += '<span class="agent-name">' + esc(agentLabel) + '</span></div>';
-      html += '<span class="state-badge ' + stateKey + '">' + config.label + '</span></div>';
+      html += '<span class="state-badge ' + stateKey + '">' + esc(t(config.labelKey)) + '</span></div>';
       if (sessionTitle) html += '<div class="card-title">' + esc(sessionTitle) + '</div>';
       html += '<div class="card-meta">';
       if (s.basename) { html += '<span class="meta-item mono">' + icon("folder") + '<span>' + esc(s.basename) + '</span></span>'; }
@@ -556,7 +504,7 @@
       html += '</div>';
       html += '</div>';
       html += '<div class="card-divider"></div>';
-      html += '<div class="card-footer" data-sid="' + sid + '"><div class="footer-events">' + icon("activity") + '<span>最近事件</span>';
+      html += '<div class="card-footer" data-sid="' + sid + '"><div class="footer-events">' + icon("activity") + '<span>' + esc(t("detail_events")) + '</span>';
       if (events.length) html += '<span class="event-count">' + events.length + '</span>';
       html += '</div><span class="footer-chevron">' + (isExpanded ? icon("collapse") : icon("expand")) + '</span></div>';
       if (events.length) html += this._renderEvents(events, isExpanded, this._animatingSid === sid);
@@ -612,12 +560,12 @@
 
       // Connection status
       html += '<div class="settings-section">';
-      html += '<div class="settings-section-title">连接</div>';
+      html += '<div class="settings-section-title">' + esc(t("settings_connection")) + '</div>';
       var st = connection.state;
       var stCfg = CONNECTION_STATES[st] || CONNECTION_STATES.disconnected;
       html += '<div class="conn-status">';
       html += '<span class="conn-status-dot ' + stCfg.dot + '"></span>';
-      html += '<span class="conn-status-text">' + stCfg.text + '</span>';
+      html += '<span class="conn-status-text">' + esc(stCfg.textKey ? t(stCfg.textKey) : "") + '</span>';
       if (connection.config) html += '<span class="conn-status-addr">' + esc(connection.config.host) + ':' + connection.config.port + '</span>';
       html += '</div>';
 
@@ -632,6 +580,17 @@
       }
       html += '</div>';
 
+      // Language picker — defaults follow the desktop; a pick here persists.
+      html += '<div class="settings-section">';
+      html += '<div class="settings-section-title">' + esc(t("settings_language")) + '</div>';
+      html += '<select class="settings-select" id="lang-select">';
+      var langs = CLAWD_I18N.SUPPORTED_LANGS, langNames = CLAWD_I18N.LANG_NATIVE_NAMES, curLang = CLAWD_I18N.getLang();
+      for (var lx = 0; lx < langs.length; lx++) {
+        html += '<option value="' + langs[lx] + '"' + (langs[lx] === curLang ? ' selected' : '') + '>' + esc(langNames[langs[lx]]) + '</option>';
+      }
+      html += '</select>';
+      html += '</div>';
+
       // Notifications (only meaningful for a paired device)
       if (paired && push && push.supported()) {
         html += '<div class="settings-section">';
@@ -643,7 +602,7 @@
 
       // Log section (collapsed by default)
       html += '<div class="log-section">';
-      html += '<button class="log-toggle" id="btn-toggle-log">日志 (' + _logBuffer.length + ')</button>';
+      html += '<button class="log-toggle" id="btn-toggle-log">' + esc(t("settings_log")) + ' (' + _logBuffer.length + ')</button>';
       html += '<div class="log-body" id="settings-log-content"></div>';
       html += '</div>';
 
@@ -678,6 +637,10 @@
           });
         });
       }
+
+      // Bind language picker
+      var langSel = document.getElementById("lang-select");
+      if (langSel) langSel.addEventListener("change", function() { CLAWD_I18N.setLang(langSel.value); });
 
       // Bind log toggle
       var logToggle = document.getElementById("btn-toggle-log");
@@ -892,7 +855,7 @@
       html += '<span class="detail-title">' + esc(title) + '</span></div>';
       html += '<div class="detail-body">';
 
-      html += '<div class="detail-block"><div class="detail-block-label">' + esc(data.agentId ? data.agentId.toUpperCase() : "AGENT") + ' &middot; ' + config.label + '</div>';
+      html += '<div class="detail-block"><div class="detail-block-label">' + esc(data.agentId ? data.agentId.toUpperCase() : "AGENT") + ' &middot; ' + esc(t(config.labelKey)) + '</div>';
       if (data.model) html += '<div class="detail-model">' + esc(data.model) + '</div>';
       html += '</div>';
 
@@ -1023,6 +986,8 @@
 
   class App {
     constructor() {
+      CLAWD_I18N.init();
+      CLAWD_I18N.onChange(() => this._applyLanguage());
       this.connection = new ConnectionManager();
       this.renderer = new SessionRenderer(document.getElementById("session-list"));
       this.settingsRenderer = new SettingsRenderer(document.getElementById("settings-content"));
@@ -1044,7 +1009,25 @@
 
       if ("serviceWorker" in navigator) navigator.serviceWorker.register("/mobile/sw.js").catch(function() {});
       this._readDeepLink();
+      this._loadDesktopLanguage();
       this._autoConnect();
+    }
+
+    _loadDesktopLanguage() {
+      fetch("/api/connection-info").then(function(r) { return r.json(); }).then(function(info) {
+        if (info && info.desktopLanguage) CLAWD_I18N.applyDesktopDefault(info.desktopLanguage);
+      }).catch(function() {});
+    }
+
+    // Re-render every visible surface in the newly chosen language.
+    _applyLanguage() {
+      var els = document.querySelectorAll("[data-i18n]");
+      for (var i = 0; i < els.length; i++) els[i].textContent = t(els[i].getAttribute("data-i18n"));
+      this._updateConnectionStatus(this.connection.state);
+      this.renderer.render();
+      this.approvals.render();
+      if (this.activeTab === "settings") this._renderSettings();
+      if (this.detail.isOpen()) this.connection.send({ type: "request_detail", sessionId: this.detail.sessionId });
     }
 
     _bindApprovals() {
@@ -1191,7 +1174,7 @@
             self.connection._updateHistoryToken(self.connection.config.host, self.connection.config.port, newToken);
             self.connection.send({ type: "token_rotate_ack" });
             log("Token rotated");
-            showToast("令牌已更新", "success");
+            showToast(t("toast_token_rotated"), "success");
           }
         }
         else if (msg.type === "paired") {
@@ -1220,7 +1203,7 @@
       var dot = document.getElementById("connection-dot");
       var text = document.getElementById("connection-text");
       dot.className = "connection-dot " + config.dot;
-      text.textContent = state === "disconnected" ? "" : config.text;
+      text.textContent = config.textKey ? t(config.textKey) : "";
       text.className = "connection-text" + (state === "connected" ? " connected" : "");
     }
 

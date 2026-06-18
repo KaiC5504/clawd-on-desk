@@ -126,7 +126,8 @@ body { display: flex; flex-direction: column; height: 100%; }
 .event-row { display: flex; align-items: center; gap: 10px; padding: 5px 0; position: relative; }
 .event-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; position: relative; z-index: 1; }
 .event-line { position: absolute; left: 3.5px; top: 13px; bottom: -5px; width: 1px; opacity: 0.3; }
-.event-icon { font-size: 12px; flex-shrink: 0; width: 16px; text-align: center; }
+.event-icon { flex-shrink: 0; width: 16px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); }
+.event-icon svg { width: 14px; height: 14px; }
 .event-row:last-child .event-line { display: none; }
 .event-label { font-size: 12px; color: var(--faint); flex: 1; }
 .event-time { font-size: 11px; color: var(--subtle); font-variant-numeric: tabular-nums; flex-shrink: 0; }
@@ -228,6 +229,8 @@ body { display: flex; flex-direction: column; height: 100%; }
 .settings-row:last-child { border-bottom: none; }
 .settings-label { font-size: 13px; color: var(--muted); }
 .settings-value { font-size: 13px; color: var(--text); font-family: ui-monospace, Menlo, Consolas, monospace; }
+.settings-select { width: 100%; padding: 10px 34px 10px 11px; border-radius: 8px; font-size: 14px; background-color: var(--bg); color: var(--text); border: 1px solid var(--card-border); cursor: pointer; -webkit-appearance: none; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23a1a1aa' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 11px center; }
+.settings-select:focus { outline: none; border-color: var(--accent); }
 
 /* === Connection Status === */
 .conn-status { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; padding: 10px; background: var(--bg); border-radius: 8px; }
@@ -281,7 +284,8 @@ body { display: flex; flex-direction: column; height: 100%; }
 .toast.success { border-left: 3px solid var(--green); }
 .toast.error { border-left: 3px solid var(--red); }
 .toast-persist { display: flex; align-items: center; gap: 12px; }
-.toast-close { cursor: pointer; opacity: 0.5; font-size: 12px; padding: 2px 4px; flex-shrink: 0; }
+.toast-close { cursor: pointer; opacity: 0.5; padding: 2px 4px; flex-shrink: 0; display: inline-flex; align-items: center; }
+.toast-close svg { width: 14px; height: 14px; }
 .toast-close:hover { opacity: 1; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
 

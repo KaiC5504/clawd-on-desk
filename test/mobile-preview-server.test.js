@@ -1,6 +1,6 @@
 "use strict";
 
-const { describe, it, before, after } = require("node:test");
+const { describe, it, before, after, beforeEach } = require("node:test");
 const assert = require("node:assert");
 const WebSocket = require("ws");
 const http = require("http");
@@ -1372,5 +1372,56 @@ describe("Mobile Preview v2 — typed pairing code", () => {
     assert.ok(b.expiresAt > clock);
     const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?code=${a.code}`);
     assert.strictEqual(await waitForClose(ws), 1008, "the replaced code stops working");
+  });
+});
+
+// ── v2: desktop language handoff (PWA defaults to the desktop's lang) ──
+
+describe("Mobile Preview v2 — desktop language handoff", () => {
+  let server;
+  let port;
+  let tmpDir;
+  let settings;
+  const sessions = new Map();
+
+  before(async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-lang-"));
+    settings = { mobileApprovalsEnabled: true, lang: "ja" };
+    server = initMobilePreviewServer({
+      sessions,
+      getSettingsSnapshot: () => settings,
+      tokenPath: path.join(tmpDir, "mobile-token.json"),
+      tlsDir: path.join(tmpDir, "tls"),
+      vapidPath: path.join(tmpDir, "vapid.json"),
+      subsPath: path.join(tmpDir, "push-subs.json"),
+      devicesPath: path.join(tmpDir, "mobile-devices.json"),
+    });
+    port = await server.start();
+  });
+
+  after(() => {
+    server.cleanup();
+    sessions.clear();
+    try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+  });
+
+  beforeEach(() => { settings = { mobileApprovalsEnabled: true, lang: "ja" }; });
+
+  it("exposes the desktop 'lang' as desktopLanguage in /api/connection-info", async () => {
+    const res = await httpGet(port, "/api/connection-info");
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(JSON.parse(res.body).desktopLanguage, "ja");
+  });
+
+  it("normalizes an unsupported lang to en", async () => {
+    settings.lang = "klingon";
+    const res = await httpGet(port, "/api/connection-info");
+    assert.strictEqual(JSON.parse(res.body).desktopLanguage, "en");
+  });
+
+  it("defaults to en when no lang is set", async () => {
+    delete settings.lang;
+    const res = await httpGet(port, "/api/connection-info");
+    assert.strictEqual(JSON.parse(res.body).desktopLanguage, "en");
   });
 });

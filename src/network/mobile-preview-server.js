@@ -20,6 +20,7 @@ const { ensureTls, getCaCertPem } = require("./lan-tls");
 const { ensureVapid, createPushSender } = require("./web-push-keys");
 const { createDeviceRegistry } = require("./mobile-device-registry");
 const { createMdnsAdvertiser } = require("./mdns-advertiser");
+const { SUPPORTED_LANGS } = require("../i18n");
 
 const PROTOCOL_VERSION = "v2";
 const DEFAULT_PORT = 23334;
@@ -177,6 +178,11 @@ function initMobilePreviewServer(ctx) {
   function connectionMode() {
     const m = settingsSnapshot().mobileConnectionMode;
     return m === "tailscale" ? "tailscale" : "lan";
+  }
+  // The PWA defaults its language to the desktop's; only a supported code is exposed.
+  function desktopLanguage() {
+    const lang = settingsSnapshot().lang;
+    return SUPPORTED_LANGS.includes(lang) ? lang : "en";
   }
 
   // ── Token rotation ──
@@ -361,6 +367,7 @@ function initMobilePreviewServer(ctx) {
         mode: connectionMode(),
         approvalsEnabled: approvalsEnabled(),
         pushPublicKey: vapid ? vapid.publicKey : null,
+        desktopLanguage: desktopLanguage(),
       };
       res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-cache" });
       res.end(JSON.stringify(info));
