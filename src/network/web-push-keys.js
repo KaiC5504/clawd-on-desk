@@ -1,6 +1,8 @@
 // src/network/web-push-keys.js — VAPID key management + Web Push sender.
 // Keys and subscriptions persist under ~/.clawd/. Push delivery uses the
-// "web-push" lib; Safari/APNs requires a mailto: subject (https://localhost is rejected).
+// "web-push" lib; Apple/APNs rejects the VAPID JWT with 403 BadJwtToken unless
+// the subject is a mailto:/https: URL on a real public domain — a reserved TLD
+// like .local (or https://localhost) is refused.
 
 "use strict";
 
@@ -9,9 +11,10 @@ const path = require("path");
 const os = require("os");
 const webpush = require("web-push");
 
-// web-push requires a mailto: (or https:) contact subject; a neutral project
-// address keeps a personal email out of shipped code.
-const VAPID_SUBJECT = "mailto:noreply@clawd.local";
+// web-push requires a mailto: (or https:) contact subject. example.com is the
+// RFC 2606 reserved domain: Apple-accepted, never a real person's address, so
+// it keeps a personal email out of shipped code.
+const VAPID_SUBJECT = "mailto:web-push@example.com";
 const DEFAULT_VAPID_PATH = path.join(os.homedir(), ".clawd", "vapid.json");
 const DEFAULT_SUBS_PATH = path.join(os.homedir(), ".clawd", "push-subs.json");
 
@@ -113,7 +116,9 @@ function createPushSender({ vapid, subsPath } = {}) {
           delete subs[deviceId];
           pruned++;
         } else {
-          console.warn(`[web-push] send to ${deviceId} failed:`, err && err.message);
+          const code = err && err.statusCode != null ? err.statusCode : "?";
+          const detail = (err && (err.body || err.message)) || String(err);
+          console.warn(`[web-push] send to ${deviceId} failed (status ${code}):`, detail);
         }
       }
     }));

@@ -43,6 +43,9 @@ describe("ensureVapid", () => {
     assert.strictEqual(typeof keys.privateKey, "string");
     assert.ok(keys.privateKey.length > 0);
     assert.match(keys.subject, /^mailto:/);
+    // Apple returns 403 BadJwtToken if the subject's TLD is reserved/non-routable
+    // (e.g. .local) — only a real public domain is accepted.
+    assert.doesNotMatch(keys.subject, /\.(local|localhost|internal|invalid|test)$/i);
 
     assert.ok(fs.existsSync(vapidPath), "vapid.json should be written to disk");
     const onDisk = JSON.parse(fs.readFileSync(vapidPath, "utf8"));
