@@ -185,17 +185,21 @@ body { display: flex; flex-direction: column; height: 100%; }
 /* === Pairing code entry (4 + 4 OTP boxes) === */
 .pair-enter { margin-top: 12px; }
 .pair-enter-title { font-size: 1.077rem; font-weight: 600; color: var(--text); margin-bottom: 12px; }
-.code-group { display: flex; align-items: center; justify-content: center; gap: 7px; margin-bottom: 10px; }
+.code-group { position: relative; display: flex; align-items: center; justify-content: center; gap: 7px; margin-bottom: 10px; }
+/* One invisible input sits over the cells and captures all typing; the cells just
+   mirror its value. opacity:0 (not hidden) keeps it focusable and tappable. */
+.code-input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; border: 0; background: transparent; opacity: 0; cursor: text; -webkit-appearance: none; }
 .code-box {
-  width: 32px; height: 44px; text-align: center;
+  display: flex; align-items: center; justify-content: center;
+  width: 32px; height: 44px;
   background: var(--bg); border: 1px solid var(--card-border); border-radius: 8px;
   color: var(--text); font-size: 20px; font-weight: 600;
   font-family: ui-monospace, Menlo, Consolas, monospace;
-  text-transform: uppercase; outline: none; caret-color: var(--accent);
+  text-transform: uppercase;
   transition: border-color 0.15s;
 }
-.code-box:focus { border-color: var(--accent); }
 .code-box.filled { border-color: var(--accent); }
+.code-group.focused .code-box.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .code-sep { color: var(--faint); font-weight: 700; padding: 0 2px; }
 .code-error { font-size: 0.923rem; color: var(--red); min-height: 16px; margin-bottom: 8px; text-align: center; }
 

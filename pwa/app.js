@@ -661,14 +661,20 @@
     }
 
     _renderCodeEntry() {
-      var boxes = "";
+      // One real input captures all 8 chars; the cells are pure visuals that mirror
+      // its value. Advancing focus between separate <input>s on every keystroke
+      // churns the iOS keyboard (~0.4s stall per key), so focus never moves here.
+      var cells = "";
       for (var i = 0; i < 8; i++) {
-        if (i === 4) boxes += '<span class="code-sep">&middot;</span>';
-        boxes += '<input class="code-box" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="1" data-idx="' + i + '" />';
+        if (i === 4) cells += '<span class="code-sep">&middot;</span>';
+        cells += '<span class="code-box" data-idx="' + i + '"></span>';
       }
+      var input = '<input class="code-input" type="text" inputmode="text" autocomplete="off"'
+        + ' autocapitalize="characters" autocorrect="off" spellcheck="false" maxlength="8"'
+        + ' aria-label="' + esc(t("pair_enter_title")) + '" />';
       var html = '<div class="pair-enter">';
       html += '<div class="pair-enter-title">' + esc(t("pair_enter_title")) + '</div>';
-      html += '<div class="code-group">' + boxes + '</div>';
+      html += '<div class="code-group">' + input + cells + '</div>';
       html += '<div class="code-error" id="code-error">' + (this.codeError ? esc(this.codeError) : "") + '</div>';
       html += '<button class="settings-action-btn off" id="btn-code-connect">' + esc(t("code_connect")) + '</button>';
       html += '<div class="settings-hint">' + esc(t("pair_enter_hint")) + '</div>';
@@ -678,49 +684,41 @@
 
     _bindCodeEntry() {
       var self = this;
-      var boxes = Array.prototype.slice.call(this.container.querySelectorAll(".code-box"));
-      if (!boxes.length) return;
+      var input = this.container.querySelector(".code-input");
+      var group = this.container.querySelector(".code-group");
+      var cells = Array.prototype.slice.call(this.container.querySelectorAll(".code-box"));
+      if (!input || !cells.length) return;
 
-      function collect() {
-        var s = "";
-        for (var i = 0; i < boxes.length; i++) s += boxes[i].value;
-        return s;
-      }
       function showError(msg) {
         self.codeError = msg;
         var el = document.getElementById("code-error");
         if (el) el.textContent = msg || "";
       }
+      function paint() {
+        var v = normalizeCode(input.value).slice(0, cells.length);
+        if (v !== input.value) input.value = v; // strip rejected chars, keep the field normalized
+        var focused = group.classList.contains("focused");
+        for (var i = 0; i < cells.length; i++) {
+          cells[i].textContent = v[i] || "";
+          cells[i].classList.toggle("filled", !!v[i]);
+          cells[i].classList.toggle("active", focused && i === v.length && v.length < cells.length);
+        }
+        return v;
+      }
       function submit() {
-        var code = normalizeCode(collect());
+        var code = normalizeCode(input.value);
         if (code.length !== 8) { showError(t("code_invalid")); return; }
         showError("");
         if (self.onSubmitCode) self.onSubmitCode(code);
       }
 
-      boxes.forEach(function(box, idx) {
-        box.addEventListener("input", function() {
-          var v = normalizeCode(box.value);
-          box.value = v.slice(-1); // keep only the last valid char
-          box.classList.toggle("filled", !!box.value);
-          if (box.value && idx < boxes.length - 1) boxes[idx + 1].focus();
-          if (normalizeCode(collect()).length === 8) submit();
-        });
-        box.addEventListener("keydown", function(e) {
-          if (e.key === "Backspace" && !box.value && idx > 0) boxes[idx - 1].focus();
-        });
-        box.addEventListener("paste", function(e) {
-          e.preventDefault();
-          var src = (e.clipboardData || window.clipboardData);
-          var code = normalizeCode(src ? src.getData("text") : "");
-          for (var i = 0; i < boxes.length; i++) {
-            boxes[i].value = code[i] || "";
-            boxes[i].classList.toggle("filled", !!boxes[i].value);
-          }
-          boxes[Math.min(code.length, boxes.length - 1)].focus();
-          if (normalizeCode(collect()).length === 8) submit();
-        });
-      });
+      // Native input/backspace/paste all flow through one "input" event — no focus
+      // hopping between elements, so the iOS keyboard never reconfigures mid-typing.
+      input.addEventListener("input", function() { if (paint().length === 8) submit(); });
+      input.addEventListener("focus", function() { group.classList.add("focused"); paint(); });
+      input.addEventListener("blur", function() { group.classList.remove("focused"); paint(); });
+      group.addEventListener("click", function() { input.focus(); });
+      paint();
 
       var connectBtn = document.getElementById("btn-code-connect");
       if (connectBtn) connectBtn.addEventListener("click", submit);
