@@ -17,6 +17,7 @@ const os = require("os");
 const WebSocket = require("ws");
 
 const { redactSecrets } = require("../redact-secrets.js");
+const { createTranscriptReader } = require("./transcript-reader");
 const { ensureTls, getCaCertPem } = require("./lan-tls");
 const { ensureVapid, createPushSender } = require("./web-push-keys");
 const { createDeviceRegistry } = require("./mobile-device-registry");
@@ -37,6 +38,7 @@ const MAX_CLIENTS = 10;
 const GRACE_PERIOD_MS = 5 * 60 * 1000;          // 5 minutes
 const ROTATION_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;     // a dark phone never leaks a handle
+const TRANSCRIPT_DEBOUNCE_MS = 250;             // coalesce a burst of deltas into one flush
 const CLAWD_HOST = "clawd.local";
 
 // Typed pairing code: a short, human-typeable bootstrap credential for the iOS
@@ -180,12 +182,21 @@ function initMobilePreviewServer(ctx) {
   const approvals = new Map();
   let decisionListener = null; // set by the MobileApprovalClient via getApprovalTransport().onDecision
 
+  // Live transcript streams, SHARED per session across every subscribed client.
+  // sessionId -> { reader, refCount, debounceTimer, buffer:{entries,patches} }. One
+  // reader owns the live EOF offset for a session and is fanned to all subscribers;
+  // per-client subscription is the scalar meta.transcriptSub (one overlay = one
+  // session). The reader is created on the first subscribe and closed only when the
+  // last subscriber leaves (refCount 0).
+  const transcriptSubs = new Map();
+
   function settingsSnapshot() {
     try { return (ctx && ctx.getSettingsSnapshot && ctx.getSettingsSnapshot()) || {}; }
     catch { return {}; }
   }
   function approvalsEnabled() { return settingsSnapshot().mobileApprovalsEnabled === true; }
   function transcriptEnabled() { return settingsSnapshot().mobileTranscriptEnabled === true; }
+  function transcriptToolOutputEnabled() { return settingsSnapshot().mobileTranscriptToolOutput === true; }
   function httpsEnabled() { return settingsSnapshot().mobileHttpsEnabled === true; }
   function connectionMode() {
     const m = settingsSnapshot().mobileConnectionMode;
@@ -501,6 +512,7 @@ function initMobilePreviewServer(ctx) {
       approvalsAllowed: device ? device.approvalsAllowed !== false : false,
       transcriptAllowed: device ? device.transcriptAllowed === true : false,
       detailSid: null,
+      transcriptSub: null,
       viaPairingCode,
     });
 
@@ -535,24 +547,37 @@ function initMobilePreviewServer(ctx) {
       if (closed) return;
       const meta = clientMeta.get(ws);
       if (!meta) return;
-      const nowMs = Date.now();
-      if (nowMs - meta.windowStart > RATE_WINDOW_MS) { meta.messageCount = 0; meta.windowStart = nowMs; }
-      if (++meta.messageCount > RATE_MAX) { ws.close(1008, "Rate limit"); return; }
 
       let msg;
       try { msg = JSON.parse(data); } catch { return; }
       if (!msg || typeof msg.type !== "string") return;
+
+      // Parse the type FIRST so transcript scrollback can be exempted from the
+      // 60/min socket-closing limit: a phone fast-paging history would otherwise
+      // trip it and get disconnected. The limit stays fully intact for every
+      // other type (the counter is only skipped for this one).
+      if (msg.type !== "request_older_transcript") {
+        const nowMs = Date.now();
+        if (nowMs - meta.windowStart > RATE_WINDOW_MS) { meta.messageCount = 0; meta.windowStart = nowMs; }
+        if (++meta.messageCount > RATE_MAX) { ws.close(1008, "Rate limit"); return; }
+      }
+
       handleClientMessage(ws, meta, msg);
     });
 
     ws.on("close", () => {
       const meta = clientMeta.get(ws);
-      if (meta) meta.detailSid = null;
+      if (meta) { meta.detailSid = null; closeTranscriptSub(ws, meta.transcriptSub); }
       clients.delete(ws);
       clientMeta.delete(ws);
       if (clients.size === 0) stopHeartbeat();
     });
-    ws.on("error", () => { clients.delete(ws); clientMeta.delete(ws); });
+    ws.on("error", () => {
+      const meta = clientMeta.get(ws);
+      if (meta) closeTranscriptSub(ws, meta.transcriptSub);
+      clients.delete(ws);
+      clientMeta.delete(ws);
+    });
   }
 
   function handleClientMessage(ws, meta, msg) {
@@ -611,6 +636,32 @@ function initMobilePreviewServer(ctx) {
         if (msg.subscription && typeof msg.subscription === "object") {
           pushSender.subscribe(meta.deviceId, msg.subscription);
         }
+        return;
+      }
+
+      // ── live transcript subscription (read-only; gated by canViewTranscript) ──
+      case "subscribe_transcript": {
+        handleSubscribeTranscript(ws, meta, String(msg.sessionId || ""));
+        return;
+      }
+
+      case "unsubscribe_transcript": {
+        const sid = String(msg.sessionId || "");
+        if (meta.transcriptSub === sid && sid) {
+          closeTranscriptSub(ws, sid);
+          meta.transcriptSub = null;
+        }
+        return;
+      }
+
+      case "request_older_transcript": {
+        const sid = String(msg.sessionId || "");
+        if (!canViewTranscript(meta)) { send(ws, "transcript_unavailable", { sessionId: sid, reason: transcriptUnavailableReason(meta, sid) }); return; }
+        const entry = transcriptSubs.get(sid);
+        // Only a current subscriber may page (the shared reader owns the offset).
+        if (!entry || meta.transcriptSub !== sid) return;
+        const { entries, hasMore } = entry.reader.readOlder(msg.beforeCursor, clampOlderCount(msg.count));
+        send(ws, "transcript_older", { sessionId: sid, entries: stripToolOutput(entries), hasMore });
         return;
       }
 
@@ -674,6 +725,176 @@ function initMobilePreviewServer(ctx) {
     console.warn(`[mobile-preview] dropped ${kind} from ${meta.ip} (write rate limit)`);
   }
 
+  // ── live transcript subscription (Stage B) ──
+
+  function clampOlderCount(count) {
+    const n = Number(count);
+    return Number.isFinite(n) && n > 0 ? Math.min(Math.trunc(n), 200) : 50;
+  }
+
+  // Why a connection is refused a transcript, in canViewTranscript's own order so
+  // the phone shows the actionable cause (enable transcripts / grant the device /
+  // use HTTPS). When the gate itself passes, the only remaining cause is a missing
+  // transcriptPath.
+  function transcriptUnavailableReason(meta, sessionId) {
+    if (!transcriptEnabled()) return "disabled";
+    if (!meta.deviceId || !meta.transcriptAllowed) return "not-allowed";
+    if (!meta.secure && !isLoopbackIp(meta.ip)) return "insecure";
+    return "no-path";
+  }
+
+  // Strip the (potentially large) redacted tool output off every tool_use chip
+  // when the include-tool-output pref is OFF. Read the pref at SEND time so a
+  // mid-session toggle takes effect on the next frame. Returns a shallow-cloned
+  // entry list so the reader's own view-model is never mutated.
+  function stripToolOutput(entries) {
+    if (transcriptToolOutputEnabled()) return entries;
+    return entries.map((entry) => {
+      if (!entry || !Array.isArray(entry.blocks)) return entry;
+      let touched = false;
+      const blocks = entry.blocks.map((block) => {
+        if (block && block.kind === "tool_use" && "output" in block) {
+          touched = true;
+          const { output, ...rest } = block;
+          return rest;
+        }
+        return block;
+      });
+      return touched ? { ...entry, blocks } : entry;
+    });
+  }
+
+  function transcriptPatchWire(sessionId, patch) {
+    const wire = { sessionId, tool_use_id: patch.tool_use_id, status: patch.status, meta: patch.meta };
+    if (transcriptToolOutputEnabled() && patch.output !== undefined) wire.output = patch.output;
+    return wire;
+  }
+
+  // Fan one prebuilt frame out to `sessionId`'s subscribers, re-gating EACH at send
+  // time: a device toggled off mid-session (canViewTranscript flips) or one that
+  // switched overlays (transcriptSub changed) simply stops receiving — no separate
+  // revoke push. The payload is identical across subscribers, so the strip/pref
+  // read happens once at the call site (still send time).
+  function sendToTranscriptSubscribers(sessionId, type, payload) {
+    for (const c of clients) {
+      if (c.readyState !== WebSocket.OPEN) continue;
+      const meta = clientMeta.get(c);
+      if (!meta || meta.transcriptSub !== sessionId || !canViewTranscript(meta)) continue;
+      send(c, type, payload);
+    }
+  }
+
+  function sendTranscriptSnapshot(ws, sessionId, snap, reset) {
+    const payload = {
+      sessionId,
+      entries: stripToolOutput(snap.entries),
+      hasMore: snap.hasMore,
+      toolOutput: transcriptToolOutputEnabled(),
+    };
+    if (reset) payload.reset = true;
+    send(ws, "transcript_snapshot", payload);
+  }
+
+  function handleSubscribeTranscript(ws, meta, sessionId) {
+    if (!canViewTranscript(meta)) {
+      send(ws, "transcript_unavailable", { sessionId, reason: transcriptUnavailableReason(meta, sessionId) });
+      return;
+    }
+    const session = ctx.sessions && ctx.sessions.get(sessionId);
+    if (!session || !session.transcriptPath) {
+      send(ws, "transcript_unavailable", { sessionId, reason: "no-path" });
+      return;
+    }
+
+    // Subscribing to a new session auto-unsubscribes the previous overlay.
+    if (meta.transcriptSub && meta.transcriptSub !== sessionId) {
+      closeTranscriptSub(ws, meta.transcriptSub);
+    }
+
+    let entry = transcriptSubs.get(sessionId);
+    if (!entry) {
+      entry = {
+        reader: createTranscriptReader({ path: session.transcriptPath }),
+        refCount: 0,
+        debounceTimer: null,
+        buffer: { entries: [], patches: [] },
+      };
+      transcriptSubs.set(sessionId, entry);
+    }
+    // A re-subscribe to the same session must not double-count the refCount.
+    if (meta.transcriptSub !== sessionId) entry.refCount += 1;
+    meta.transcriptSub = sessionId;
+
+    // Each subscriber gets its own snapshot off the shared reader (the reader is
+    // created once; additional subscribers reuse its live offset).
+    sendTranscriptSnapshot(ws, sessionId, entry.reader.snapshot(50), false);
+  }
+
+  // Single teardown path: decrement the session's refCount and, at 0, clear its
+  // debounce timer + close the reader + drop the Map entry. Idempotent — a missing
+  // entry or a mismatched sessionId is a no-op so every teardown site can call it
+  // unconditionally.
+  function closeTranscriptSub(ws, sessionId) {
+    if (!sessionId) return;
+    const entry = transcriptSubs.get(sessionId);
+    if (!entry) return;
+    entry.refCount -= 1;
+    if (entry.refCount <= 0) {
+      if (entry.debounceTimer) { clearTimeout(entry.debounceTimer); entry.debounceTimer = null; }
+      try { entry.reader.close(); } catch {}
+      transcriptSubs.delete(sessionId);
+    }
+  }
+
+  // Drain the per-session coalescing buffer to every (re-gated) subscriber: one
+  // transcript_delta with the merged entries, then one transcript_result_patch per
+  // buffered cross-delta patch.
+  function flushTranscriptBuffer(sessionId) {
+    const entry = transcriptSubs.get(sessionId);
+    if (!entry) return;
+    entry.debounceTimer = null;
+    const { entries, patches } = entry.buffer;
+    entry.buffer = { entries: [], patches: [] };
+    if (entries.length === 0 && patches.length === 0) return;
+
+    if (entries.length > 0) {
+      sendToTranscriptSubscribers(sessionId, "transcript_delta", { sessionId, entries: stripToolOutput(entries) });
+    }
+    for (const patch of patches) {
+      sendToTranscriptSubscribers(sessionId, "transcript_result_patch", transcriptPatchWire(sessionId, patch));
+    }
+  }
+
+  // Per global tick: pull a delta off each live session's shared reader. A path
+  // rotation/truncation (reset) re-snapshots everyone and drops buffered deltas;
+  // otherwise the new entries/patches are buffered and a 250 ms debounce is armed
+  // so a burst of triggers collapses into one delta frame.
+  function pumpTranscripts() {
+    for (const [sessionId, entry] of transcriptSubs) {
+      const session = ctx.sessions && ctx.sessions.get(sessionId);
+      const currentPath = session ? session.transcriptPath : null;
+      const delta = entry.reader.readDelta(currentPath);
+      if (delta.reset) {
+        if (entry.debounceTimer) { clearTimeout(entry.debounceTimer); entry.debounceTimer = null; }
+        entry.buffer = { entries: [], patches: [] };
+        sendToTranscriptSubscribers(sessionId, "transcript_snapshot", {
+          sessionId,
+          entries: stripToolOutput(delta.entries),
+          hasMore: false,
+          toolOutput: transcriptToolOutputEnabled(),
+          reset: true,
+        });
+        continue;
+      }
+      if (delta.entries.length === 0 && delta.patches.length === 0) continue;
+      entry.buffer.entries.push(...delta.entries);
+      entry.buffer.patches.push(...delta.patches);
+      if (!entry.debounceTimer) {
+        entry.debounceTimer = setTimeout(() => flushTranscriptBuffer(sessionId), TRANSCRIPT_DEBOUNCE_MS);
+      }
+    }
+  }
+
   // ws re-emits the underlying server's 'error' (e.g. EADDRINUSE) on the
   // WebSocket.Server; swallow it here so the port-retry in listenExactPort (which
   // listens on the http server's own 'error') can do its job without crashing.
@@ -703,6 +924,7 @@ function initMobilePreviewServer(ctx) {
       for (const c of clients) {
         const meta = clientMeta.get(c);
         if (c.isAlive === false || (meta && nowMs - meta.lastPong > CLIENT_TIMEOUT_MS)) {
+          if (meta) closeTranscriptSub(c, meta.transcriptSub);
           c.terminate();
           clients.delete(c);
           clientMeta.delete(c);
@@ -711,6 +933,7 @@ function initMobilePreviewServer(ctx) {
         // Retry token_rotate for unacked clients (up to 3 times)
         if (meta && meta.pendingRotationAcks > 0) {
           if (meta.pendingRotationAcks >= 3) {
+            closeTranscriptSub(c, meta.transcriptSub);
             c.close(1008, "Token rotation not acknowledged");
             clients.delete(c);
             clientMeta.delete(c);
@@ -933,9 +1156,40 @@ function initMobilePreviewServer(ctx) {
     for (const sid of sessionCache.keys()) {
       if (!upstream.has(sid)) {
         sessionCache.delete(sid);
+        teardownSessionTranscript(sid);
         broadcast(buildMessage("session_deleted", { sessionId: sid }));
       }
     }
+  }
+
+  // Reflect a registry transcript-permission change onto every live connection of
+  // that device, so the send-time canViewTranscript re-gate fires immediately. On
+  // revoke (allowed=false) also tear down any active sub so its reader isn't leaked
+  // until the socket eventually closes.
+  function applyTranscriptAllowedToLiveMetas(deviceId, allowed) {
+    if (!deviceId) return;
+    for (const [c, meta] of clientMeta) {
+      if (meta.deviceId !== deviceId) continue;
+      meta.transcriptAllowed = allowed;
+      if (!allowed && meta.transcriptSub) {
+        closeTranscriptSub(c, meta.transcriptSub);
+        meta.transcriptSub = null;
+      }
+    }
+  }
+
+  // Drop a whole session's transcript stream at once (its source is gone): clear
+  // every subscriber's scalar sub, then force the shared entry's timer + reader to
+  // close regardless of refCount.
+  function teardownSessionTranscript(sessionId) {
+    if (!transcriptSubs.has(sessionId)) return;
+    for (const meta of clientMeta.values()) {
+      if (meta.transcriptSub === sessionId) meta.transcriptSub = null;
+    }
+    const entry = transcriptSubs.get(sessionId);
+    if (entry.debounceTimer) { clearTimeout(entry.debounceTimer); entry.debounceTimer = null; }
+    try { entry.reader.close(); } catch {}
+    transcriptSubs.delete(sessionId);
   }
 
   // ── Public API ──
@@ -1078,6 +1332,13 @@ function initMobilePreviewServer(ctx) {
     clients.clear();
     clientMeta.clear();
     approvals.clear();
+    // Drop every shared reader + its debounce timer (the per-client subs went with
+    // clientMeta.clear() above; this releases the server-owned side).
+    for (const entry of transcriptSubs.values()) {
+      if (entry.debounceTimer) { clearTimeout(entry.debounceTimer); entry.debounceTimer = null; }
+      try { entry.reader.close(); } catch {}
+    }
+    transcriptSubs.clear();
     decisionListener = null;
     try { mdns.stop(); } catch {}
     stopHttps();
@@ -1096,6 +1357,8 @@ function initMobilePreviewServer(ctx) {
       if (meta.detailSid) focused.add(meta.detailSid);
     }
     for (const sid of focused) broadcastDetail(sid);
+    // Live transcript deltas ride the same coarse tick; coalesced per session.
+    pumpTranscripts();
   }
 
   function getHttpsInfo() {
@@ -1137,11 +1400,31 @@ function initMobilePreviewServer(ctx) {
     getHttpsInfo,
     getPushStatus,
     listDevices: () => deviceRegistry.list(),
-    revokeDevice: (id) => { const r = deviceRegistry.revoke(id); if (pushSender) pushSender.unsubscribe(id); return r; },
+    revokeDevice: (id) => {
+      const r = deviceRegistry.revoke(id);
+      if (pushSender) pushSender.unsubscribe(id);
+      applyTranscriptAllowedToLiveMetas(id, false);
+      return r;
+    },
     setDeviceApprovalsAllowed: (id, allowed) => deviceRegistry.setApprovalsAllowed(id, allowed),
-    setDeviceTranscriptAllowed: (id, allowed) => deviceRegistry.setTranscriptAllowed(id, allowed),
+    setDeviceTranscriptAllowed: (id, allowed) => {
+      const r = deviceRegistry.setTranscriptAllowed(id, allowed);
+      applyTranscriptAllowedToLiveMetas(id, !!allowed);
+      return r;
+    },
     getLocalIP,
     PROTOCOL_VERSION,
+    // Test-only inspection of the shared transcript-reader lifecycle.
+    _transcriptDebug: () => ({
+      refCount: (sid) => { const e = transcriptSubs.get(sid); return e ? e.refCount : 0; },
+      has: (sid) => transcriptSubs.has(sid),
+      readerCount: () => transcriptSubs.size,
+      pendingTimers: () => {
+        let n = 0;
+        for (const e of transcriptSubs.values()) if (e.debounceTimer) n += 1;
+        return n;
+      },
+    }),
   };
 }
 

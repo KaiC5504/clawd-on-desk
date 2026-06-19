@@ -1888,3 +1888,345 @@ describe("Mobile Preview — fixed configured port", () => {
     await new Promise((r) => setTimeout(r, 100));
   });
 });
+
+// ── Stage B: live transcript subscription over WS ──
+
+function userLine(text, uuid) {
+  return JSON.stringify({ type: "user", uuid, timestamp: "2026-06-20T00:00:00Z", message: { role: "user", content: text } }) + "\n";
+}
+function assistantTextLine(text, uuid) {
+  return JSON.stringify({ type: "assistant", uuid, timestamp: "2026-06-20T00:00:01Z", message: { role: "assistant", content: [{ type: "text", text }] } }) + "\n";
+}
+function assistantToolLine(toolUseId, name, input, uuid) {
+  return JSON.stringify({
+    type: "assistant", uuid, timestamp: "2026-06-20T00:00:02Z",
+    message: { role: "assistant", content: [{ type: "tool_use", id: toolUseId, name, input }] },
+  }) + "\n";
+}
+function toolResultLine(toolUseId, output, uuid) {
+  return JSON.stringify({
+    type: "user", uuid, timestamp: "2026-06-20T00:00:03Z",
+    message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolUseId, content: output }] },
+    toolUseResult: { type: "Bash", numLines: 1 },
+  }) + "\n";
+}
+
+describe("Mobile Preview — Stage B live transcript subscription", () => {
+  let server;
+  let port;
+  let token;
+  let tmpDir;
+  let settings;
+  const sessions = new Map();
+
+  function ctxPaths(extra = {}) {
+    return {
+      sessions,
+      getSettingsSnapshot: () => settings,
+      tokenPath: path.join(tmpDir, "mobile-token.json"),
+      tlsDir: path.join(tmpDir, "tls"),
+      vapidPath: path.join(tmpDir, "vapid.json"),
+      subsPath: path.join(tmpDir, "push-subs.json"),
+      devicesPath: path.join(tmpDir, "mobile-devices.json"),
+      ...extra,
+    };
+  }
+
+  before(async () => {
+    TEST_HTTP_PORT = await getFreePort();
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-trx-b-"));
+  });
+
+  after(() => {
+    if (server) { try { server.cleanup(); } catch {} server = null; }
+    sessions.clear();
+    try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+  });
+
+  async function freshServer() {
+    if (server) { server.cleanup(); await new Promise((r) => setTimeout(r, 100)); }
+    sessions.clear();
+    settings = { mobileApprovalsEnabled: true, mobileTranscriptEnabled: true, mobileTranscriptToolOutput: true };
+    server = initServer(ctxPaths());
+    port = await server.start();
+    token = server.getToken();
+    return server;
+  }
+
+  // Write a transcript file for `sid` and register the session pointing at it.
+  function makeTranscript(sid, lines) {
+    const file = path.join(tmpDir, `${sid}.jsonl`);
+    fs.writeFileSync(file, lines.join(""));
+    sessions.set(sid, {
+      state: "working", agentId: "claude-code", cwd: "/home/user/proj",
+      sessionTitle: "T", updatedAt: Date.now(), recentEvents: [], transcriptPath: file,
+    });
+    return file;
+  }
+
+  function appendTranscript(file, line) {
+    fs.appendFileSync(file, line);
+  }
+
+  // Connect, pair, grant transcriptAllowed, reconnect with the secret so the new
+  // meta captures transcriptAllowed at connect. Returns the live client.
+  async function connectTranscriptDevice(deviceId) {
+    const { client, secret } = await pairDevice(server, port, token, deviceId);
+    client.close();
+    await new Promise((r) => setTimeout(r, 50));
+    server.setDeviceTranscriptAllowed(deviceId, true);
+    const reconnected = connectWithCredential(port, { deviceId, secret });
+    await waitForOpen(reconnected.ws);
+    await reconnected.waitFor("snapshot");
+    reconnected.send({ type: "client_hello", protocol: "v2" });
+    return { client: reconnected, secret };
+  }
+
+  it("refuses subscribe with reason 'disabled' when the global transcript pref is off", async () => {
+    await freshServer();
+    makeTranscript("s-dis", [assistantTextLine("hi", "u1")]);
+    const { client } = await connectTranscriptDevice("dev-disabled");
+    settings.mobileTranscriptEnabled = false;
+    client.send({ type: "subscribe_transcript", sessionId: "s-dis" });
+    const msg = await client.waitFor("transcript_unavailable");
+    assert.strictEqual(msg.reason, "disabled");
+    client.close();
+    await new Promise((r) => setTimeout(r, 50));
+  });
+
+  it("refuses with 'not-allowed' for a paired device lacking transcriptAllowed", async () => {
+    await freshServer();
+    makeTranscript("s-na", [assistantTextLine("hi", "u1")]);
+    const { client } = await pairDevice(server, port, token, "dev-notallowed"); // no transcript grant
+    client.send({ type: "subscribe_transcript", sessionId: "s-na" });
+    const msg = await client.waitFor("transcript_unavailable");
+    assert.strictEqual(msg.reason, "not-allowed");
+    client.close();
+    await new Promise((r) => setTimeout(r, 50));
+  });
+
+  it("refuses with 'no-path' when the session has no transcriptPath", async () => {
+    await freshServer();
+    sessions.set("s-nopath", { state: "working", updatedAt: Date.now(), recentEvents: [] });
+    const { client } = await connectTranscriptDevice("dev-nopath");
+    client.send({ type: "subscribe_transcript", sessionId: "s-nopath" });
+    const msg = await client.waitFor("transcript_unavailable");
+    assert.strictEqual(msg.reason, "no-path");
+    client.close();
+    await new Promise((r) => setTimeout(r, 50));
+  });
+
+  it("an allowed device gets a snapshot, and a second client shares ONE reader (refCount 2)", async () => {
+    await freshServer();
+    makeTranscript("s-share", [userLine("hello", "u1"), assistantTextLine("world", "a1")]);
+    const a = await connectTranscriptDevice("dev-share-a");
+    a.client.send({ type: "subscribe_transcript", sessionId: "s-share" });
+    const snapA = await a.client.waitFor("transcript_snapshot");
+    assert.strictEqual(snapA.sessionId, "s-share");
+    assert.ok(Array.isArray(snapA.entries) && snapA.entries.length >= 1);
+    assert.strictEqual(snapA.toolOutput, true);
+
+    const b = await connectTranscriptDevice("dev-share-b");
+    b.client.send({ type: "subscribe_transcript", sessionId: "s-share" });
+    const snapB = await b.client.waitFor("transcript_snapshot");
+    assert.ok(snapB.entries.length >= 1, "second subscriber gets its own snapshot");
+
+    assert.strictEqual(server._transcriptDebug().refCount("s-share"), 2, "reader shared, refCount is 2");
+    assert.strictEqual(server._transcriptDebug().readerCount(), 1, "exactly one reader created");
+    a.client.close();
+    b.client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("coalesces N rapid triggers within 250ms into ONE transcript_delta", async () => {
+    await freshServer();
+    const file = makeTranscript("s-coal", [assistantTextLine("start", "a0")]);
+    const { client } = await connectTranscriptDevice("dev-coal");
+    client.send({ type: "subscribe_transcript", sessionId: "s-coal" });
+    await client.waitFor("transcript_snapshot");
+
+    const deltas = [];
+    client.ws.on("message", (data) => {
+      const m = JSON.parse(data);
+      if (m.type === "transcript_delta") deltas.push(m);
+    });
+
+    // 3 appends + 3 ticks back-to-back, all well inside the 250ms debounce window.
+    appendTranscript(file, assistantTextLine("one", "a1")); server.onSnapshot();
+    appendTranscript(file, assistantTextLine("two", "a2")); server.onSnapshot();
+    appendTranscript(file, assistantTextLine("three", "a3")); server.onSnapshot();
+
+    await new Promise((r) => setTimeout(r, 400));
+    assert.strictEqual(deltas.length, 1, "a burst collapses into a single delta frame");
+    assert.strictEqual(deltas[0].entries.length, 3, "all three new entries ride the one delta");
+    client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("re-gates per send: a device toggled off mid-session stops, an allowed one keeps receiving", async () => {
+    await freshServer();
+    const file = makeTranscript("s-regate", [assistantTextLine("start", "a0")]);
+    const off = await connectTranscriptDevice("dev-regate-off");
+    const keep = await connectTranscriptDevice("dev-regate-keep");
+    off.client.send({ type: "subscribe_transcript", sessionId: "s-regate" });
+    keep.client.send({ type: "subscribe_transcript", sessionId: "s-regate" });
+    await off.client.waitFor("transcript_snapshot");
+    await keep.client.waitFor("transcript_snapshot");
+
+    const offDeltas = [];
+    const keepDeltas = [];
+    off.client.ws.on("message", (d) => { const m = JSON.parse(d); if (m.type === "transcript_delta") offDeltas.push(m); });
+    keep.client.ws.on("message", (d) => { const m = JSON.parse(d); if (m.type === "transcript_delta") keepDeltas.push(m); });
+
+    // Revoke transcript for the first device, then drive a delta.
+    server.setDeviceTranscriptAllowed("dev-regate-off", false);
+    appendTranscript(file, assistantTextLine("after", "a1"));
+    server.onSnapshot();
+    await new Promise((r) => setTimeout(r, 400));
+
+    assert.strictEqual(offDeltas.length, 0, "revoked device receives no delta");
+    assert.strictEqual(keepDeltas.length, 1, "still-allowed device keeps receiving");
+    off.client.close();
+    keep.client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("strips tool output + toolOutput:false when the include-tool-output pref is OFF", async () => {
+    await freshServer();
+    settings.mobileTranscriptToolOutput = false;
+    makeTranscript("s-tool", [
+      assistantToolLine("tu-1", "Bash", { command: "echo hi" }, "a1"),
+      toolResultLine("tu-1", "hello output", "u2"),
+    ]);
+    const { client } = await connectTranscriptDevice("dev-tool-off");
+    client.send({ type: "subscribe_transcript", sessionId: "s-tool" });
+    const snap = await client.waitFor("transcript_snapshot");
+    assert.strictEqual(snap.toolOutput, false);
+    const chip = snap.entries.flatMap((e) => e.blocks).find((b) => b.kind === "tool_use");
+    assert.ok(chip, "a tool chip is present");
+    assert.ok(!("output" in chip), "tool output is stripped when the pref is OFF");
+
+    // Flip ON, re-subscribe → output present + toolOutput:true. A fresh one-shot
+    // listener (not waitFor, which would replay the first buffered snapshot).
+    settings.mobileTranscriptToolOutput = true;
+    const nextSnap = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("no second snapshot")), 3000);
+      client.ws.on("message", (data) => {
+        const m = JSON.parse(data);
+        if (m.type === "transcript_snapshot" && m.toolOutput === true) { clearTimeout(timer); resolve(m); }
+      });
+    });
+    client.send({ type: "subscribe_transcript", sessionId: "s-tool" });
+    const snap2 = await nextSnap;
+    assert.strictEqual(snap2.toolOutput, true);
+    const chip2 = snap2.entries.flatMap((e) => e.blocks).find((b) => b.kind === "tool_use");
+    assert.ok("output" in chip2, "redacted output crosses the wire when the pref is ON");
+    client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("closeTranscriptSub: after unsubscribe the reader is closed at refCount 0 with no timer", async () => {
+    await freshServer();
+    const file = makeTranscript("s-teardown", [assistantTextLine("x", "a0")]);
+    const { client } = await connectTranscriptDevice("dev-teardown");
+    client.send({ type: "subscribe_transcript", sessionId: "s-teardown" });
+    await client.waitFor("transcript_snapshot");
+    assert.strictEqual(server._transcriptDebug().refCount("s-teardown"), 1);
+
+    // Arm a debounce, then unsubscribe before it fires — the timer must be cleared.
+    appendTranscript(file, assistantTextLine("y", "a1"));
+    server.onSnapshot();
+    client.send({ type: "unsubscribe_transcript", sessionId: "s-teardown" });
+    await new Promise((r) => setTimeout(r, 400));
+    assert.strictEqual(server._transcriptDebug().has("s-teardown"), false, "reader/entry dropped at refCount 0");
+    assert.strictEqual(server._transcriptDebug().pendingTimers(), 0, "no debounce timer remains");
+    client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("closing the ws tears the sub down (no leaked reader)", async () => {
+    await freshServer();
+    makeTranscript("s-wsclose", [assistantTextLine("x", "a0")]);
+    const { client } = await connectTranscriptDevice("dev-wsclose");
+    client.send({ type: "subscribe_transcript", sessionId: "s-wsclose" });
+    await client.waitFor("transcript_snapshot");
+    assert.strictEqual(server._transcriptDebug().refCount("s-wsclose"), 1);
+    client.close();
+    await new Promise((r) => setTimeout(r, 150));
+    assert.strictEqual(server._transcriptDebug().has("s-wsclose"), false, "ws close drops the reader");
+  });
+
+  it("session_deleted tears down the reader for all subscribers", async () => {
+    await freshServer();
+    makeTranscript("s-del", [assistantTextLine("x", "a0")]);
+    server.onSnapshot(); // prime cache so the deletion is detected next tick
+    const a = await connectTranscriptDevice("dev-del-a");
+    const b = await connectTranscriptDevice("dev-del-b");
+    a.client.send({ type: "subscribe_transcript", sessionId: "s-del" });
+    b.client.send({ type: "subscribe_transcript", sessionId: "s-del" });
+    await a.client.waitFor("transcript_snapshot");
+    await b.client.waitFor("transcript_snapshot");
+    assert.strictEqual(server._transcriptDebug().refCount("s-del"), 2);
+
+    sessions.delete("s-del");
+    const gone = a.client.waitFor("session_deleted");
+    server.onSnapshot();
+    await gone;
+    assert.strictEqual(server._transcriptDebug().has("s-del"), false, "deleted session's reader is dropped");
+    a.client.close();
+    b.client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("request_older_transcript is EXEMPT from the 60/min close, but counted types still close 1008", async () => {
+    await freshServer();
+    makeTranscript("s-older", [assistantTextLine("x", "a0")]);
+    const { client } = await connectTranscriptDevice("dev-older");
+    client.send({ type: "subscribe_transcript", sessionId: "s-older" });
+    await client.waitFor("transcript_snapshot");
+
+    // 80 rapid request_older messages — must NOT trip the 60/min socket close.
+    for (let i = 0; i < 80; i++) client.send({ type: "request_older_transcript", sessionId: "s-older", beforeCursor: "", count: 50 });
+    await new Promise((r) => setTimeout(r, 200));
+    assert.strictEqual(client.ws.readyState, WebSocket.OPEN, "scrollback storm stays connected");
+
+    // A counted type past the limit still closes with 1008.
+    const counted = connectWithCredential(port, { token });
+    await waitForOpen(counted.ws);
+    await counted.waitFor("snapshot");
+    const closed = waitForClose(counted.ws);
+    for (let i = 0; i < 70; i++) counted.send({ type: "request_detail", sessionId: "nope" });
+    const code = await closed;
+    assert.strictEqual(code, 1008, "a counted-type flood still closes the socket");
+    client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("a path rotation (readDelta reset) re-snapshots subscribers with reset:true", async () => {
+    await freshServer();
+    makeTranscript("s-rot", [assistantTextLine("old", "a0")]);
+    const { client } = await connectTranscriptDevice("dev-rotation");
+    client.send({ type: "subscribe_transcript", sessionId: "s-rot" });
+    await client.waitFor("transcript_snapshot");
+
+    // Point the session at a brand-new transcript file → reader detects the path
+    // change and returns reset:true on the next tick.
+    const newFile = path.join(tmpDir, "s-rot-2.jsonl");
+    fs.writeFileSync(newFile, assistantTextLine("brand new", "b0"));
+    sessions.get("s-rot").transcriptPath = newFile;
+
+    const resetSnap = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("no reset snapshot")), 3000);
+      client.ws.on("message", (data) => {
+        const m = JSON.parse(data);
+        if (m.type === "transcript_snapshot" && m.reset === true) { clearTimeout(timer); resolve(m); }
+      });
+    });
+    server.onSnapshot();
+    const snap = await resetSnap;
+    assert.strictEqual(snap.reset, true, "a rotation pushes a fresh snapshot with reset:true");
+    assert.ok(snap.entries.some((e) => e.blocks.some((b) => b.text === "brand new")), "reset carries the new file's content");
+    client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+});
