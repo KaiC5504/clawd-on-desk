@@ -85,9 +85,9 @@ describe("pwa i18n — disconnect strings", () => {
 });
 
 describe("pwa service worker — cache bump for the new app.js/i18n.js", () => {
-  it("bumps CACHE_NAME to v18 so the updated assets ship to the installed PWA", () => {
-    assert.match(sw, /clawd-mobile-v18/, "CACHE_NAME must be bumped to v18");
-    assert.doesNotMatch(sw, /clawd-mobile-v17/, "old v17 cache name must be gone");
+  it("bumps CACHE_NAME to v20 so the updated assets ship to the installed PWA", () => {
+    assert.match(sw, /clawd-mobile-v20/, "CACHE_NAME must be bumped to v20");
+    assert.doesNotMatch(sw, /clawd-mobile-v19/, "old v19 cache name must be gone");
   });
 });
 
