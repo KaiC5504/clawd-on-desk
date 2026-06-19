@@ -1034,3 +1034,92 @@ describe("buildStateBody — transcript_path forwarding", () => {
     assert.ok(!("transcript_path" in body));
   });
 });
+
+describe("buildStateBody — mid-turn assistant_last_output (Stage A)", () => {
+  it("sets assistant_last_output on a non-Stop event from transcript narration", () => {
+    const file = writeTmpJsonl([
+      { type: "assistant", sessionId: "sid-1", message: { content: "Let me read the config file." } },
+    ]);
+    const body = buildStateBody(
+      "PreToolUse",
+      { session_id: "sid-1", tool_name: "Read", tool_input: { file_path: "cfg.json" }, transcript_path: file },
+      mockResolve
+    );
+    assert.strictEqual(body.event, "PreToolUse");
+    assert.strictEqual(body.assistant_last_output, "Let me read the config file.");
+  });
+
+  it("still suppresses assistant_last_output on a Stop that upgrades to ApiError", () => {
+    const file = writeTmpJsonl([
+      { type: "assistant", sessionId: "sid-1", message: { content: "earlier text" } },
+      makeApiErrorEntry({ sessionId: "sid-1", error: "rate_limit", uuid: "e1" }),
+      { type: "system", parentUuid: "e1", sessionId: "sid-1" },
+    ]);
+    const body = buildStateBody(
+      "Stop",
+      { session_id: "sid-1", transcript_path: file },
+      mockResolve
+    );
+    assert.strictEqual(body.event, "ApiError");
+    assert.ok(!("assistant_last_output" in body));
+  });
+});
+
+describe("buildStateBody — tool_summary whitelist (Stage A)", () => {
+  it("sets tool_summary from file_path for Read", () => {
+    const body = buildStateBody(
+      "PreToolUse",
+      { session_id: "s", tool_name: "Read", tool_input: { file_path: "src/server.js" } },
+      mockResolve
+    );
+    assert.strictEqual(body.tool_summary, "src/server.js");
+  });
+
+  it("sets tool_summary from command for Bash", () => {
+    const body = buildStateBody(
+      "PreToolUse",
+      { session_id: "s", tool_name: "Bash", tool_input: { command: "npm test" } },
+      mockResolve
+    );
+    assert.strictEqual(body.tool_summary, "npm test");
+  });
+
+  it("sets tool_summary from pattern for Grep", () => {
+    const body = buildStateBody(
+      "PreToolUse",
+      { session_id: "s", tool_name: "Grep", tool_input: { pattern: "TODO" } },
+      mockResolve
+    );
+    assert.strictEqual(body.tool_summary, "TODO");
+  });
+
+  it("omits tool_summary for a non-whitelisted tool", () => {
+    const body = buildStateBody(
+      "PreToolUse",
+      { session_id: "s", tool_name: "WebFetch", tool_input: { url: "https://example.com" } },
+      mockResolve
+    );
+    assert.ok(!("tool_summary" in body));
+  });
+});
+
+describe("buildStateBody — body-size guard (Stage A)", () => {
+  it("keeps the body under 4096 bytes with a long cwd + long output", () => {
+    const longOutput = "X".repeat(5000);
+    const file = writeTmpJsonl([
+      { type: "assistant", sessionId: "sid-1", message: { content: longOutput } },
+    ]);
+    const longCwd = "/deeply/nested/project/path".repeat(70); // ~1900 chars
+    const body = buildStateBody(
+      "PreToolUse",
+      { session_id: "sid-1", cwd: longCwd, tool_name: "Read", tool_input: { file_path: "a" }, transcript_path: file },
+      mockResolve
+    );
+    const size = JSON.stringify(body).length;
+    assert.ok(size < 4096, `body must stay under 4096 bytes (was ${size})`);
+    // The guard sheds output (not cwd) and flags the truncation.
+    assert.strictEqual(body.cwd, longCwd);
+    assert.ok(typeof body.assistant_last_output === "string");
+    assert.strictEqual(body.assistant_last_output_truncated, true);
+  });
+});

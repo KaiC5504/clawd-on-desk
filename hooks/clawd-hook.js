@@ -10,7 +10,14 @@ const { extractClaudeContextUsageFromEntries } = require("./context-usage");
 const { createPidResolver, readStdinJson, getPlatformConfig } = require("./shared-process");
 
 const TRANSCRIPT_TAIL_BYTES = 262144; // 256 KB
-const ASSISTANT_OUTPUT_MAX = 2200;
+const ASSISTANT_OUTPUT_MAX = 3000;
+// The /state endpoint caps bodies at 4096 bytes; assistant_last_output shares that
+// budget with cwd/pid_chain/etc. Keep a margin so a long cwd + max output never 413s.
+const BODY_SIZE_SOFT_LIMIT = 3900;
+// Per-tool whitelist of the single arg that names the tool's current TARGET. Only
+// these are forwarded as tool_summary (raw over loopback, redacted at the phone
+// boundary) — never the whole tool_input.
+const TOOL_SUMMARY_MAX = 240;
 // Observed in Claude Code 2.1.150 StopFailure hook schema (tyq enum).
 // Unknown values from future versions fall back to "unknown".
 const API_ERROR_TYPES = new Set([
@@ -293,6 +300,39 @@ function buildToolInputFingerprint(toolInput) {
     .digest("hex");
 }
 
+// Pull the one whitelisted arg that labels the tool's current target. Returns a
+// short string or null; never echoes arbitrary tool_input. The value is raw here
+// (loopback) and gets redacted server-side at the phone boundary.
+function extractToolSummary(toolName, toolInput) {
+  if (!toolName || !toolInput || typeof toolInput !== "object") return null;
+  let value;
+  switch (toolName) {
+    case "Read":
+    case "Edit":
+    case "Write":
+    case "MultiEdit":
+    case "NotebookEdit":
+      value = toolInput.file_path || toolInput.path;
+      break;
+    case "Bash":
+    case "BashOutput":
+      value = toolInput.command;
+      break;
+    case "Grep":
+    case "Glob":
+      value = toolInput.pattern;
+      break;
+    default:
+      return null;
+  }
+  if (typeof value !== "string") return null;
+  const trimmed = normalizeAssistantOutputText(value).replace(/\n+/g, " ").trim();
+  if (!trimmed) return null;
+  return trimmed.length > TOOL_SUMMARY_MAX
+    ? `${trimmed.slice(0, TOOL_SUMMARY_MAX - 1)}…`
+    : trimmed;
+}
+
 function shouldReportForegroundWtHwnd(event) {
   return event === "SessionStart" || event === "UserPromptSubmit";
 }
@@ -367,6 +407,8 @@ function buildStateBody(event, payload, resolve) {
   if (toolName) body.tool_name = toolName;
   if (toolUseId) body.tool_use_id = toolUseId;
   if (toolInputFingerprint) body.tool_input_fingerprint = toolInputFingerprint;
+  const toolSummary = extractToolSummary(toolName, payload.tool_input);
+  if (toolSummary) body.tool_summary = toolSummary;
   // Read transcript tail once and reuse for both session title extraction and
   // API error detection (Stop only). Avoids two file reads per hook invocation.
   const transcriptEntries = readTranscriptTailEntries(payload.transcript_path);
@@ -406,6 +448,15 @@ function buildStateBody(event, payload, resolve) {
         if (assistantOutput.truncated) body.assistant_last_output_truncated = true;
       }
     }
+  } else if (event !== "Stop") {
+    // Mid-turn live output: surface the latest assistant narration ("Let me read
+    // X") so the phone's detail screen follows the turn, not just its end. The
+    // Stop/ApiError special-casing above stays the sole owner of the Stop branch.
+    const assistantOutput = extractLastAssistantTextFromEntries(transcriptEntries, sessionId);
+    if (assistantOutput && assistantOutput.text) {
+      body.assistant_last_output = assistantOutput.text;
+      if (assistantOutput.truncated) body.assistant_last_output_truncated = true;
+    }
   }
   // #406 completion-gate inputs. A Stop that still has live background shells or
   // cron wakeups, or a Stop-hook continuation (stop_hook_active), is not a real
@@ -440,7 +491,27 @@ function buildStateBody(event, payload, resolve) {
     }
   }
 
+  trimBodyToFit(body);
   return body;
+}
+
+// assistant_last_output shares the 4096-byte /state body cap with cwd/pid_chain/
+// host/etc. A long cwd plus a max-length output can push the JSON over the limit
+// and trip a 413. Shed chars from assistant_last_output (the largest, most
+// elastic field) until the whole body fits under the soft limit; if it can't,
+// drop the field entirely rather than risk the body being rejected.
+function trimBodyToFit(body) {
+  if (typeof body.assistant_last_output !== "string") return;
+  while (JSON.stringify(body).length > BODY_SIZE_SOFT_LIMIT) {
+    const text = body.assistant_last_output;
+    if (!text) { delete body.assistant_last_output; delete body.assistant_last_output_truncated; return; }
+    const over = JSON.stringify(body).length - BODY_SIZE_SOFT_LIMIT;
+    const cut = Math.max(16, over);
+    const next = text.slice(0, Math.max(0, text.length - cut));
+    if (next === text) { delete body.assistant_last_output; delete body.assistant_last_output_truncated; return; }
+    body.assistant_last_output = next;
+    body.assistant_last_output_truncated = true;
+  }
 }
 
 function main() {

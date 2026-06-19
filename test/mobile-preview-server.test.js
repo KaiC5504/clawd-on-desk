@@ -1276,6 +1276,215 @@ describe("Mobile Preview v2 — approvals + pairing", () => {
   });
 });
 
+describe("Mobile Preview — transcript-gated + redacted detail (Stage A)", () => {
+  let server;
+  let port;
+  let token;
+  let tmpDir;
+  let settings;
+  const sessions = new Map();
+
+  function ctxPaths(extra = {}) {
+    return {
+      sessions,
+      getSettingsSnapshot: () => settings,
+      tokenPath: path.join(tmpDir, "mobile-token.json"),
+      tlsDir: path.join(tmpDir, "tls"),
+      vapidPath: path.join(tmpDir, "vapid.json"),
+      subsPath: path.join(tmpDir, "push-subs.json"),
+      devicesPath: path.join(tmpDir, "mobile-devices.json"),
+      focusSession: () => {},
+      ...extra,
+    };
+  }
+
+  before(async () => {
+    TEST_HTTP_PORT = await getFreePort();
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-trx-"));
+  });
+
+  after(() => {
+    if (server) { try { server.cleanup(); } catch {} server = null; }
+    sessions.clear();
+    try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+  });
+
+  async function freshServer() {
+    if (server) { server.cleanup(); await new Promise((r) => setTimeout(r, 100)); }
+    sessions.clear();
+    settings = { mobileApprovalsEnabled: true, mobileTranscriptEnabled: true };
+    server = initServer(ctxPaths());
+    port = await server.start();
+    token = server.getToken();
+    return server;
+  }
+
+  // Plain prose: long enough to exceed both caps, but with spaces so the secret
+  // redactor's long-blob rule (40+ contiguous base64/hex chars) never fires and
+  // we can assert exact post-slice lengths.
+  function longText(n) {
+    return "word ".repeat(Math.ceil(n / 5)).slice(0, n);
+  }
+
+  function setSession(sid, extra) {
+    sessions.set(sid, {
+      state: "working",
+      agentId: "claude-code",
+      cwd: "/home/user/proj",
+      sessionTitle: "Detail",
+      updatedAt: Date.now(),
+      recentEvents: [],
+      ...extra,
+    });
+    server.onSnapshot();
+  }
+
+  // Pair, grant transcriptAllowed in the registry, then reconnect with the secret
+  // so the new connection captures transcriptAllowed at connect time.
+  async function connectTranscriptDevice(deviceId) {
+    const { client, secret } = await pairDevice(server, port, token, deviceId);
+    client.close();
+    await new Promise((r) => setTimeout(r, 50));
+    server.setDeviceTranscriptAllowed(deviceId, true);
+    const reconnected = connectWithCredential(port, { deviceId, secret });
+    await waitForOpen(reconnected.ws);
+    await reconnected.waitFor("snapshot");
+    reconnected.send({ type: "client_hello", protocol: "v2" });
+    return reconnected;
+  }
+
+  it("a transcript-allowed device gets full redacted output + currentTool/toolSummary", async () => {
+    await freshServer();
+    setSession("s-trx", {
+      assistantLastOutput: longText(2500),
+      currentTool: "Read",
+      toolSummary: "src/server.js",
+    });
+    const client = await connectTranscriptDevice("trx-device-01");
+    client.send({ type: "request_detail", sessionId: "s-trx" });
+    const detail = await client.waitFor("detail");
+
+    assert.ok(detail.data.lastOutput.length > 800, "enriched output exceeds the conservative 800 cap");
+    assert.strictEqual(detail.data.lastOutput.length, 2500);
+    assert.strictEqual(detail.data.currentTool, "Read");
+    assert.strictEqual(detail.data.toolSummary, "src/server.js");
+    client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("a non-allowed (token-only) device gets the conservative ≤800 form with no new fields", async () => {
+    await freshServer();
+    setSession("s-trx2", {
+      assistantLastOutput: longText(2500),
+      currentTool: "Bash",
+      toolSummary: "ls -la",
+    });
+    const client = connectWithCredential(port, { token });
+    await waitForOpen(client.ws);
+    await client.waitFor("snapshot");
+    client.send({ type: "request_detail", sessionId: "s-trx2" });
+    const detail = await client.waitFor("detail");
+
+    assert.strictEqual(detail.data.lastOutput.length, 800, "non-allowed output is capped at 800");
+    assert.ok(!("currentTool" in detail.data), "no currentTool for non-allowed device");
+    assert.ok(!("toolSummary" in detail.data), "no toolSummary for non-allowed device");
+    client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("a paired device WITHOUT transcriptAllowed stays conservative", async () => {
+    await freshServer();
+    setSession("s-trx3", { assistantLastOutput: longText(2500), currentTool: "Read", toolSummary: "a.js" });
+    // pairDevice grants no transcript permission; the new device defaults to false.
+    const { client } = await pairDevice(server, port, token, "trx-device-noperm");
+    client.send({ type: "request_detail", sessionId: "s-trx3" });
+    const detail = await client.waitFor("detail");
+    assert.strictEqual(detail.data.lastOutput.length, 800);
+    assert.ok(!("currentTool" in detail.data));
+    client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("when mobileTranscriptEnabled is OFF, even an allowed device stays conservative", async () => {
+    await freshServer();
+    setSession("s-trx4", { assistantLastOutput: longText(2500), currentTool: "Read", toolSummary: "a.js" });
+    const client = await connectTranscriptDevice("trx-device-off");
+    settings.mobileTranscriptEnabled = false; // flip the global pref OFF after connect
+    client.send({ type: "request_detail", sessionId: "s-trx4" });
+    const detail = await client.waitFor("detail");
+    assert.strictEqual(detail.data.lastOutput.length, 800);
+    assert.ok(!("currentTool" in detail.data));
+    client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("redacts a fake sk- token and PEM block on BOTH the enriched and conservative paths", async () => {
+    await freshServer();
+    const secrety = "before sk-ABCDEFGHIJKLMNOPQRSTUVWX0123 and -----BEGIN PRIVATE KEY-----\nMIIabc123\n-----END PRIVATE KEY----- after";
+    setSession("s-secret", { assistantLastOutput: secrety, currentTool: "Bash", toolSummary: "echo sk-ABCDEFGHIJKLMNOPQRSTUVWX0123" });
+
+    const allowed = await connectTranscriptDevice("trx-secret-allowed");
+    allowed.send({ type: "request_detail", sessionId: "s-secret" });
+    const enriched = await allowed.waitFor("detail");
+    assert.ok(!/sk-ABCDEFGHIJKLMNOPQRSTUVWX0123/.test(enriched.data.lastOutput), "sk- token leaked on enriched path");
+    assert.ok(!/BEGIN PRIVATE KEY/.test(enriched.data.lastOutput), "PEM leaked on enriched path");
+    assert.ok(!/sk-ABCDEFGHIJKLMNOPQRSTUVWX0123/.test(enriched.data.toolSummary || ""), "sk- leaked in toolSummary");
+    allowed.close();
+
+    const tokenClient = connectWithCredential(port, { token });
+    await waitForOpen(tokenClient.ws);
+    await tokenClient.waitFor("snapshot");
+    tokenClient.send({ type: "request_detail", sessionId: "s-secret" });
+    const conservative = await tokenClient.waitFor("detail");
+    assert.ok(!/sk-ABCDEFGHIJKLMNOPQRSTUVWX0123/.test(conservative.data.lastOutput), "sk- token leaked on conservative path");
+    assert.ok(!/BEGIN PRIVATE KEY/.test(conservative.data.lastOutput), "PEM leaked on conservative path");
+    tokenClient.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("broadcastDetail pushes a fresh detail to a focused client after a snapshot change", async () => {
+    await freshServer();
+    setSession("s-live", { assistantLastOutput: "first output", currentTool: "Read", toolSummary: "a.js" });
+    const client = await connectTranscriptDevice("trx-live-01");
+    client.send({ type: "request_detail", sessionId: "s-live" });
+    const first = await client.waitFor("detail");
+    assert.strictEqual(first.data.lastOutput, "first output");
+
+    // Mutate the session + tick — the focused client should get a PUSHED detail
+    // (no new request_detail). Listen for the next "detail" frame specifically so
+    // the already-buffered first one isn't what we assert on.
+    const pushed = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("no pushed detail")), 5000);
+      client.ws.on("message", (data) => {
+        const m = JSON.parse(data);
+        if (m.type === "detail" && m.data && m.data.lastOutput === "second output") {
+          clearTimeout(timer);
+          resolve(m);
+        }
+      });
+    });
+    setSession("s-live", { assistantLastOutput: "second output", currentTool: "Bash", toolSummary: "npm test" });
+    const second = await pushed;
+    assert.strictEqual(second.data.lastOutput, "second output");
+    assert.strictEqual(second.data.toolSummary, "npm test");
+    client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("detailSid clears on close (no further detail pushes after disconnect)", async () => {
+    await freshServer();
+    setSession("s-close", { assistantLastOutput: "out", currentTool: "Read", toolSummary: "a.js" });
+    const client = await connectTranscriptDevice("trx-close-01");
+    client.send({ type: "request_detail", sessionId: "s-close" });
+    await client.waitFor("detail");
+    client.close();
+    await new Promise((r) => setTimeout(r, 100));
+    // After close, a tick must not throw and there is no live client to push to.
+    setSession("s-close", { assistantLastOutput: "changed", currentTool: "Bash", toolSummary: "x" });
+    assert.doesNotThrow(() => server.onSnapshot());
+  });
+});
+
 describe("Mobile Preview v2 — public HTTP endpoints", () => {
   let server;
   let port;

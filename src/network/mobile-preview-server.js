@@ -16,6 +16,7 @@ const crypto = require("crypto");
 const os = require("os");
 const WebSocket = require("ws");
 
+const { redactSecrets } = require("../redact-secrets.js");
 const { ensureTls, getCaCertPem } = require("./lan-tls");
 const { ensureVapid, createPushSender } = require("./web-push-keys");
 const { createDeviceRegistry } = require("./mobile-device-registry");
@@ -184,6 +185,7 @@ function initMobilePreviewServer(ctx) {
     catch { return {}; }
   }
   function approvalsEnabled() { return settingsSnapshot().mobileApprovalsEnabled === true; }
+  function transcriptEnabled() { return settingsSnapshot().mobileTranscriptEnabled === true; }
   function httpsEnabled() { return settingsSnapshot().mobileHttpsEnabled === true; }
   function connectionMode() {
     const m = settingsSnapshot().mobileConnectionMode;
@@ -497,6 +499,8 @@ function initMobilePreviewServer(ctx) {
       protocol: "v1",
       deviceId: device ? device.deviceId : null,
       approvalsAllowed: device ? device.approvalsAllowed !== false : false,
+      transcriptAllowed: device ? device.transcriptAllowed === true : false,
+      detailSid: null,
       viaPairingCode,
     });
 
@@ -542,6 +546,8 @@ function initMobilePreviewServer(ctx) {
     });
 
     ws.on("close", () => {
+      const meta = clientMeta.get(ws);
+      if (meta) meta.detailSid = null;
       clients.delete(ws);
       clientMeta.delete(ws);
       if (clients.size === 0) stopHeartbeat();
@@ -580,6 +586,7 @@ function initMobilePreviewServer(ctx) {
         catch { send(ws, "pair_error", { message: "registration failed" }); return; }
         meta.deviceId = entry.deviceId;
         meta.approvalsAllowed = entry.approvalsAllowed !== false;
+        meta.transcriptAllowed = entry.transcriptAllowed === true;
         // A code is a one-time bootstrap: consume it the moment it produces a
         // durable credential so a sniffed code can't be replayed to pair again.
         if (meta.viaPairingCode) { freshPairingCode(now()); meta.viaPairingCode = false; }
@@ -590,7 +597,11 @@ function initMobilePreviewServer(ctx) {
       case "request_detail": {
         const sid = String(msg.sessionId || "");
         const session = ctx.sessions && ctx.sessions.get(sid);
-        send(ws, "detail", { sessionId: sid, data: buildDetailPayload(sid, session) });
+        // Track the focused session so the snapshot tick can live-push detail
+        // updates to this client (broadcastDetail). A later request_detail for a
+        // different session simply replaces the tracked sid.
+        meta.detailSid = sid || null;
+        send(ws, "detail", { sessionId: sid, data: buildDetailPayload(sid, session, meta) });
         return;
       }
 
@@ -643,6 +654,18 @@ function initMobilePreviewServer(ctx) {
   function canWrite(meta) {
     if (!approvalsEnabled()) return false;
     if (!meta.deviceId || !meta.approvalsAllowed) return false;
+    if (!meta.secure && !isLoopbackIp(meta.ip)) return false;
+    return true;
+  }
+
+  // Gate for the enriched (longer + current-tool) detail view. Mirrors canWrite:
+  // the transcript pref is on, this is a paired device explicitly allowed to view
+  // transcripts, and the link is wss or loopback (the device secret rides the WS
+  // URL, so on plain ws over a shared LAN it is sniffable — a non-secure remote
+  // device gets only the conservative, already-redacted detail).
+  function canViewTranscript(meta) {
+    if (!transcriptEnabled()) return false;
+    if (!meta.deviceId || !meta.transcriptAllowed) return false;
     if (!meta.secure && !isLoopbackIp(meta.ip)) return false;
     return true;
   }
@@ -743,7 +766,15 @@ function initMobilePreviewServer(ctx) {
   // Superset of buildPayload for the per-session detail view. recentEvents lives
   // only on the internal session object (never in the wire snapshot), so we read
   // it straight from ctx.sessions here. No raw cwd/pid/host — only the basename.
-  function buildDetailPayload(sid, session) {
+  //
+  // SECURITY INVARIANT: this is the ONLY serialization site that puts
+  // assistantLastOutput / tool target on the wire to a phone (buildPayload, used
+  // by the list snapshot, never carries them). So redactSecrets is applied here,
+  // at the phone boundary, on every output/tool-target field. Per-client gate:
+  // a canViewTranscript device gets the full redacted output (≤3000) plus the
+  // current-tool fields; everyone else gets the conservative ≤800 redacted output
+  // and no new fields — exactly today's behavior, just now redacted.
+  function buildDetailPayload(sid, session, meta) {
     const base = buildPayload(sid, session);
     if (!base) return null;
     const out = { ...base, canFocus: typeof (ctx && ctx.focusSession) === "function" };
@@ -756,10 +787,35 @@ function initMobilePreviewServer(ctx) {
         percent: typeof u.percent === "number" ? u.percent : undefined,
       };
     }
+    const enriched = !!(meta && canViewTranscript(meta));
     if (typeof session.assistantLastOutput === "string" && session.assistantLastOutput) {
-      out.lastOutput = session.assistantLastOutput.slice(0, 800);
+      const cap = enriched ? 3000 : 800;
+      out.lastOutput = redactSecrets(session.assistantLastOutput.slice(0, cap));
+    }
+    if (enriched) {
+      if (typeof session.currentTool === "string" && session.currentTool) {
+        out.currentTool = session.currentTool;
+      }
+      if (typeof session.toolSummary === "string" && session.toolSummary) {
+        out.toolSummary = redactSecrets(session.toolSummary);
+      }
     }
     return out;
+  }
+
+  // Live-push a fresh detail payload for `sid` to every client currently focused
+  // on it. Each client gets its own per-meta redaction + length gate, so a
+  // transcript-allowed phone sees the enriched view and others stay conservative.
+  // Driven by the snapshot tick — no separate request_detail needed per turn/tool.
+  function broadcastDetail(sid) {
+    if (!sid) return;
+    const session = ctx.sessions && ctx.sessions.get(sid);
+    for (const c of clients) {
+      if (c.readyState !== WebSocket.OPEN) continue;
+      const meta = clientMeta.get(c);
+      if (!meta || meta.detailSid !== sid) continue;
+      send(c, "detail", { sessionId: sid, data: buildDetailPayload(sid, session, meta) });
+    }
   }
 
   // ── Approval transport (v2) ──
@@ -1030,6 +1086,14 @@ function initMobilePreviewServer(ctx) {
   function onSnapshot() {
     if (closed) return;
     pollSessions();
+    // Live-update each focused detail screen on the same coarse tick the list
+    // snapshot rides — so the detail view follows turn/tool boundaries without a
+    // fresh request_detail. Dedupe the focused sids; each client is gated per-meta.
+    const focused = new Set();
+    for (const meta of clientMeta.values()) {
+      if (meta.detailSid) focused.add(meta.detailSid);
+    }
+    for (const sid of focused) broadcastDetail(sid);
   }
 
   function getHttpsInfo() {

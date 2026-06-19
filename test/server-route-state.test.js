@@ -154,6 +154,8 @@ describe("server-route-state POST", () => {
         contextUsage: null,
         assistantLastOutput: null,
         assistantLastOutputTruncated: false,
+        currentTool: null,
+        toolSummary: null,
         transcriptPath: undefined,
         permissionSuspect: true,
         preserveState: true,
