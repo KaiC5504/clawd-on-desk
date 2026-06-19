@@ -194,4 +194,86 @@ describe("Mobile Device Registry", () => {
     assert.strictEqual(reg.size(), 0);
     assert.deepStrictEqual(reg.list(), []);
   });
+
+  // ── transcript flag (defaults FALSE, unlike approvalsAllowed which defaults TRUE) ──
+
+  it("register() sets transcriptAllowed to false for a new device", () => {
+    const reg = newRegistry();
+    const entry = reg.register({ deviceId: "device-t01", label: "Phone" });
+    assert.strictEqual(entry.transcriptAllowed, false);
+  });
+
+  it("load() back-compat: device with no transcriptAllowed field defaults to false", () => {
+    // Write a device file that has approvalsAllowed but no transcriptAllowed.
+    const raw = {
+      version: 1,
+      devices: [{
+        deviceId: "device-t02",
+        label: "OldPhone",
+        secret: "a".repeat(64),
+        pairedAt: 1700000000000,
+        lastSeen: 1700000001000,
+        approvalsAllowed: true,
+        // transcriptAllowed intentionally absent
+      }],
+    };
+    fs.writeFileSync(storeFile, JSON.stringify(raw), "utf8");
+    const reg = createDeviceRegistry({ filePath: storeFile });
+    const pub = reg.list().find((e) => e.deviceId === "device-t02");
+    assert.ok(pub, "device should load from disk");
+    assert.strictEqual(pub.transcriptAllowed, false, "missing field must default to false");
+    // Prove the asymmetry: approvals still defaults true on old data.
+    assert.strictEqual(pub.approvalsAllowed, true);
+  });
+
+  it("load() back-compat: device with no approvalsAllowed still loads approvalsAllowed true", () => {
+    const raw = {
+      version: 1,
+      devices: [{
+        deviceId: "device-t03",
+        label: "AncientPhone",
+        secret: "b".repeat(64),
+        pairedAt: 1700000000000,
+        lastSeen: 1700000001000,
+        // both flags absent
+      }],
+    };
+    fs.writeFileSync(storeFile, JSON.stringify(raw), "utf8");
+    const reg = createDeviceRegistry({ filePath: storeFile });
+    const pub = reg.list().find((e) => e.deviceId === "device-t03");
+    assert.ok(pub);
+    assert.strictEqual(pub.approvalsAllowed, true, "approvalsAllowed defaults true");
+    assert.strictEqual(pub.transcriptAllowed, false, "transcriptAllowed defaults false");
+  });
+
+  it("setTranscriptAllowed() flips the flag and publicEntry includes it", () => {
+    const reg = newRegistry();
+    const { secret } = reg.register({ deviceId: "device-t04", label: "Phone" });
+    assert.strictEqual(reg.authenticate("device-t04", secret).transcriptAllowed, false);
+
+    assert.strictEqual(reg.setTranscriptAllowed("device-t04", true), true);
+    assert.strictEqual(reg.authenticate("device-t04", secret).transcriptAllowed, true);
+    assert.strictEqual(reg.list().find((e) => e.deviceId === "device-t04").transcriptAllowed, true);
+
+    assert.strictEqual(reg.setTranscriptAllowed("device-t04", false), true);
+    assert.strictEqual(reg.authenticate("device-t04", secret).transcriptAllowed, false);
+
+    assert.strictEqual(reg.setTranscriptAllowed("never-existed", true), false);
+  });
+
+  it("setTranscriptAllowed() persists across a reload", () => {
+    const regA = newRegistry();
+    regA.register({ deviceId: "device-t05", label: "Phone" });
+    regA.setTranscriptAllowed("device-t05", true);
+
+    const regB = createDeviceRegistry({ filePath: storeFile });
+    assert.strictEqual(regB.list().find((e) => e.deviceId === "device-t05").transcriptAllowed, true);
+  });
+
+  it("publicEntry includes transcriptAllowed", () => {
+    const reg = newRegistry();
+    reg.register({ deviceId: "device-t06", label: "Phone" });
+    const listed = reg.list();
+    assert.ok("transcriptAllowed" in listed[0], "transcriptAllowed must appear in publicEntry");
+  });
 });

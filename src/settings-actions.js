@@ -288,6 +288,8 @@ const updateRegistry = {
   keepSizeAcrossDisplays: requireBoolean("keepSizeAcrossDisplays"),
   mobilePreviewEnabled: requireBoolean("mobilePreviewEnabled"),
   mobileApprovalsEnabled: requireBoolean("mobileApprovalsEnabled"),
+  mobileTranscriptEnabled: requireBoolean("mobileTranscriptEnabled"),
+  mobileTranscriptToolOutput: requireBoolean("mobileTranscriptToolOutput"),
   mobileHttpsEnabled: requireBoolean("mobileHttpsEnabled"),
   mobileCertTrustedHint: requireBoolean("mobileCertTrustedHint"),
   mobileConnectionMode: requireEnum("mobileConnectionMode", ["lan", "tailscale"]),

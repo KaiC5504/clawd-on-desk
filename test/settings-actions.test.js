@@ -129,6 +129,17 @@ describe("updateRegistry pure-data validators", () => {
     }
   });
 
+  it("transcript prefs accept booleans and reject non-booleans", () => {
+    const deps = { snapshot: baseSnapshot };
+    for (const key of ["mobileTranscriptEnabled", "mobileTranscriptToolOutput"]) {
+      assert.strictEqual(updateRegistry[key](true, deps).status, "ok", `${key}(true)`);
+      assert.strictEqual(updateRegistry[key](false, deps).status, "ok", `${key}(false)`);
+      assert.strictEqual(updateRegistry[key]("yes", deps).status, "error", `${key}("yes")`);
+      assert.strictEqual(updateRegistry[key](1, deps).status, "error", `${key}(1)`);
+      assert.strictEqual(updateRegistry[key](null, deps).status, "error", `${key}(null)`);
+    }
+  });
+
   it("saved pixel sizes require non-negative finite numbers", () => {
     const deps = { snapshot: baseSnapshot };
     for (const key of ["savedPixelWidth", "savedPixelHeight"]) {

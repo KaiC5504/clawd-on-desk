@@ -1073,6 +1073,7 @@ function initMobilePreviewServer(ctx) {
     listDevices: () => deviceRegistry.list(),
     revokeDevice: (id) => { const r = deviceRegistry.revoke(id); if (pushSender) pushSender.unsubscribe(id); return r; },
     setDeviceApprovalsAllowed: (id, allowed) => deviceRegistry.setApprovalsAllowed(id, allowed),
+    setDeviceTranscriptAllowed: (id, allowed) => deviceRegistry.setTranscriptAllowed(id, allowed),
     getLocalIP,
     PROTOCOL_VERSION,
   };

@@ -618,6 +618,26 @@ function registerSettingsIpc(options = {}) {
     }
   });
 
+  handle("settings:set-mobile-device-transcript", async (_event, payload) => {
+    if (!payload || typeof payload !== "object") {
+      return { status: "error", message: "payload must be { deviceId, allowed }" };
+    }
+    const { deviceId, allowed } = payload;
+    if (typeof deviceId !== "string" || !deviceId) {
+      return { status: "error", message: "deviceId must be a non-empty string" };
+    }
+    try {
+      const lanWsServer = options.getLanWsServer ? options.getLanWsServer() : null;
+      if (!lanWsServer || typeof lanWsServer.setDeviceTranscriptAllowed !== "function") {
+        return { status: "error", message: "LAN bridge not available" };
+      }
+      const ok = lanWsServer.setDeviceTranscriptAllowed(deviceId, !!allowed);
+      return { status: "ok", updated: !!ok };
+    } catch (err) {
+      return { status: "error", message: (err && err.message) || String(err) };
+    }
+  });
+
   // Returns the live pairing code for the phone to type (4+4 OTP boxes). The
   // code is ephemeral and never persisted; it's the camera-free way the iOS
   // home-screen app bootstraps its first pairing.

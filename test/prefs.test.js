@@ -168,6 +168,12 @@ describe("prefs.getDefaults", () => {
       quickCommandsEnabled: false,
     });
   });
+
+  it("defaults transcript prefs to false (read-confidential; must be opted in)", () => {
+    const d = prefs.getDefaults();
+    assert.strictEqual(d.mobileTranscriptEnabled, false);
+    assert.strictEqual(d.mobileTranscriptToolOutput, false);
+  });
 });
 
 describe("prefs.validate", () => {

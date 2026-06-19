@@ -188,6 +188,10 @@ const SCHEMA = {
   // Mobile interactive-approval surface (iPhone PWA). Off by default: a paired
   // phone can monitor, but decision/focus messages are rejected until opted in.
   mobileApprovalsEnabled: { type: "boolean", default: false },
+  // Live transcript streaming to the paired phone. Both default false —
+  // transcript is read-confidential and must be explicitly opted in per device.
+  mobileTranscriptEnabled: { type: "boolean", default: false },
+  mobileTranscriptToolOutput: { type: "boolean", default: false },
   // HTTPS listener (self-signed CA) for iOS Web Push + secure-context PWA.
   mobileHttpsEnabled: { type: "boolean", default: false },
   // Fixed listener ports. An installed iOS A2HS app freezes its launch host:port,

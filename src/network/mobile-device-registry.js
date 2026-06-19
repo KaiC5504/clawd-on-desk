@@ -32,6 +32,7 @@ function publicEntry(entry) {
     pairedAt: entry.pairedAt,
     lastSeen: entry.lastSeen,
     approvalsAllowed: entry.approvalsAllowed,
+    transcriptAllowed: entry.transcriptAllowed,
   };
 }
 
@@ -56,6 +57,8 @@ function createDeviceRegistry({ filePath, now } = {}) {
           pairedAt: typeof d.pairedAt === "number" ? d.pairedAt : clock(),
           lastSeen: typeof d.lastSeen === "number" ? d.lastSeen : clock(),
           approvalsAllowed: typeof d.approvalsAllowed === "boolean" ? d.approvalsAllowed : true,
+          // Old stored devices must NOT be auto-granted transcript (read-confidential; must opt in).
+          transcriptAllowed: typeof d.transcriptAllowed === "boolean" ? d.transcriptAllowed : false,
         });
       }
     } catch {
@@ -91,6 +94,7 @@ function createDeviceRegistry({ filePath, now } = {}) {
       pairedAt: existing ? existing.pairedAt : ts,
       lastSeen: ts,
       approvalsAllowed: existing ? existing.approvalsAllowed : true,
+      transcriptAllowed: existing ? existing.transcriptAllowed : false,
     };
     devices.set(deviceId, entry);
     // If the write fails the secret never reaches disk, so durable auth would
@@ -148,6 +152,15 @@ function createDeviceRegistry({ filePath, now } = {}) {
     return true;
   }
 
+  function setTranscriptAllowed(deviceId, allowed) {
+    load();
+    const entry = devices.get(deviceId);
+    if (!entry) return false;
+    entry.transcriptAllowed = !!allowed;
+    persist();
+    return true;
+  }
+
   function has(deviceId) {
     load();
     return devices.has(deviceId);
@@ -166,6 +179,7 @@ function createDeviceRegistry({ filePath, now } = {}) {
     revoke,
     revokeAll,
     setApprovalsAllowed,
+    setTranscriptAllowed,
     has,
     size,
   };
