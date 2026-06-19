@@ -113,6 +113,17 @@ function isPathInside(parent, child) {
   return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+// Push banners stay deliberately content-free: a lock-screen notification should
+// say what's waiting, not dump the plan/question/command (the full thing lives in
+// the app). iOS already prefixes the app name ("Clawd"), so the title carries no
+// agent name either — the user knows they kicked off the work.
+function buildPushNotification(payload) {
+  const kind = (payload && payload.kind) || "approval";
+  if (kind === "plan") return { title: "Plan ready to review", body: "Tap to open it on your phone" };
+  if (kind === "question") return { title: "A question for you", body: "Tap to choose an answer" };
+  return { title: "Approval needed", body: "Tap to review the request" };
+}
+
 function generatePairingCode() {
   // 256 % 32 === 0, so (byte % 32) draws each symbol from exactly 8 byte values
   // — no modulo bias.
@@ -793,11 +804,10 @@ function initMobilePreviewServer(ctx) {
 
   function firePush(handle, payload) {
     if (!pushSender || !pushSender.hasSub()) return;
-    const body = String(payload.detail || payload.title || "Approval needed")
-      .replace(/\s+/g, " ").trim().slice(0, 140);
+    const note = buildPushNotification(payload);
     Promise.resolve(pushSender.send({
-      title: payload.title || "Approval needed",
-      body,
+      title: note.title,
+      body: note.body,
       handle,
       tag: `approval-${handle}`,
     })).catch(() => {});
@@ -1068,4 +1078,4 @@ function initMobilePreviewServer(ctx) {
   };
 }
 
-module.exports = { initMobilePreviewServer, PROTOCOL_VERSION };
+module.exports = { initMobilePreviewServer, PROTOCOL_VERSION, buildPushNotification };

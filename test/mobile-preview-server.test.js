@@ -8,7 +8,7 @@ const net = require("net");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { initMobilePreviewServer, PROTOCOL_VERSION } = require("../src/network/mobile-preview-server");
+const { initMobilePreviewServer, PROTOCOL_VERSION, buildPushNotification } = require("../src/network/mobile-preview-server");
 
 function waitForMessage(ws, type, timeoutMs = 5000) {
   return new Promise((resolve, reject) => {
@@ -124,6 +124,34 @@ function initServer(ctx) {
     },
   });
 }
+
+describe("buildPushNotification — clean, content-free banners", () => {
+  it("titles each kind without the agent name and never leaks the prompt body", () => {
+    const plan = buildPushNotification({ kind: "plan", title: "claude-code shared a plan", detail: "Step 1\nStep 2..." });
+    assert.strictEqual(plan.title, "Plan ready to review");
+    assert.ok(!/claude-code/i.test(plan.title + plan.body), "must not name the agent");
+    assert.ok(!/Step 1/.test(plan.body), "must not dump the plan content into the banner");
+
+    const question = buildPushNotification({ kind: "question", title: "claude-code asks a question", detail: "Pick a color" });
+    assert.strictEqual(question.title, "A question for you");
+    assert.ok(!/Pick a color/.test(question.body), "must not dump the question text");
+
+    const approval = buildPushNotification({ kind: "approval", title: "claude-code requests Bash", detail: "Agent: claude-code\nTool: Bash" });
+    assert.strictEqual(approval.title, "Approval needed");
+    assert.ok(!/claude-code|Tool:/.test(approval.body), "must not dump the tool summary");
+  });
+
+  it("defaults a kind-less payload (classic approval) to the approval banner", () => {
+    const note = buildPushNotification({ title: "x", detail: "y" });
+    assert.strictEqual(note.title, "Approval needed");
+    assert.ok(note.body.length > 0);
+  });
+
+  it("survives a null/garbage payload without throwing", () => {
+    assert.strictEqual(buildPushNotification(null).title, "Approval needed");
+    assert.strictEqual(buildPushNotification(undefined).title, "Approval needed");
+  });
+});
 
 function waitForClose(ws, timeoutMs = 3000) {
   return new Promise((resolve) => {

@@ -279,11 +279,13 @@
       var s = data.state;
       var config = STATE_CONFIG[s];
       if (!config) return;
-      var label = data.title || data.agentId || "Agent";
+      // Body is the session title only — never the agent id (the user knows what
+      // they launched) and never a redundant echo of the title above it.
+      var label = data.title || "";
       if (s === "error" || s === "attention") {
-        this._notify(t(config.labelKey), label + " - " + t(config.labelKey), s);
+        this._notify(t(config.labelKey), label, s);
       } else if ((prev === "working" || prev === "thinking") && s === "idle") {
-        this._notify(t("notif_task_done_title"), t("notif_task_done_body", { label: label }), "idle");
+        this._notify(t("notif_task_done_title"), label ? t("notif_task_done_body", { label: label }) : "", "idle");
       }
     }
 
