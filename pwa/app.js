@@ -1425,15 +1425,18 @@
       this.sessionId = null;
       this.onClose = null;
       this.onFocus = null;
+      this._bindSwipe();
     }
 
     open(sessionId) {
+      this._resetSwipeStyles();
       this.sessionId = sessionId;
       this.container.classList.remove("hidden");
       this._renderShell();
     }
 
     close() {
+      this._resetSwipeStyles();
       this.sessionId = null;
       this.container.classList.add("hidden");
       this.container.innerHTML = "";
@@ -1442,10 +1445,73 @@
 
     isOpen() { return this.sessionId !== null; }
 
+    // iOS-style interactive back: an edge swipe from the left follows the finger
+    // and pops the screen once it passes a third of the width. Standalone PWAs
+    // get no native Safari back gesture, so we recreate it here. Vertical scrolls
+    // keep working — we only commit once rightward movement dominates.
+    _bindSwipe() {
+      var self = this;
+      var EDGE = 40;       // left-edge start zone (px)
+      var TRIGGER = 0.32;  // fraction of width that commits the pop
+      var startX = 0, startY = 0, dx = 0, width = 1;
+      var tracking = false, dragging = false, settleToken = 0;
+
+      this.container.addEventListener("touchstart", function(e) {
+        if (self.sessionId === null || e.touches.length !== 1) return;
+        var x = e.touches[0].clientX;
+        if (x > EDGE) return;
+        tracking = true; dragging = false; dx = 0;
+        startX = x; startY = e.touches[0].clientY;
+        width = self.container.offsetWidth || window.innerWidth || 1;
+        settleToken++;
+        self.container.style.transition = "none";
+      }, { passive: true });
+
+      this.container.addEventListener("touchmove", function(e) {
+        if (!tracking) return;
+        dx = e.touches[0].clientX - startX;
+        var dy = e.touches[0].clientY - startY;
+        if (!dragging) {
+          if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+          if (dx <= 0 || Math.abs(dy) > Math.abs(dx)) { tracking = false; return; }
+          dragging = true;
+        }
+        if (dx < 0) dx = 0;
+        e.preventDefault();
+        self.container.style.transform = "translateX(" + dx + "px)";
+        self.container.style.opacity = String(1 - Math.min(dx / width, 1) * 0.3);
+      }, { passive: false });
+
+      function settle() {
+        if (!tracking) return;
+        tracking = false;
+        var committed = dragging && dx > width * TRIGGER;
+        var token = ++settleToken;
+        var capturedId = self.sessionId;
+        self.container.style.transition = "transform 0.2s ease-out, opacity 0.2s ease-out";
+        self.container.style.transform = committed ? "translateX(100%)" : "translateX(0)";
+        self.container.style.opacity = committed ? "0" : "1";
+        dragging = false;
+        window.setTimeout(function() {
+          if (token !== settleToken) return;            // a newer gesture took over
+          if (committed && self.sessionId === capturedId) self.close();
+          else if (!committed) self._resetSwipeStyles();
+        }, 200);
+      }
+      this.container.addEventListener("touchend", settle);
+      this.container.addEventListener("touchcancel", settle);
+    }
+
+    _resetSwipeStyles() {
+      this.container.style.transition = "";
+      this.container.style.transform = "";
+      this.container.style.opacity = "";
+    }
+
     _renderShell() {
       var self = this;
       this.container.innerHTML =
-        '<div class="detail-header"><button class="detail-back">' + icon("arrowLeft") + '<span>' + esc(t("detail_back")) + '</span></button></div>' +
+        '<div class="detail-header"><button class="detail-back icon-only" aria-label="' + esc(t("detail_back")) + '">' + icon("arrowLeft") + '</button></div>' +
         '<div class="detail-body"><div class="detail-block"><div class="detail-block-label">' + esc(t("detail_loading")) + '</div></div></div>';
       this.container.querySelector(".detail-back").addEventListener("click", function() { self.close(); });
     }
@@ -1455,7 +1521,7 @@
       var self = this;
       var config = STATE_CONFIG[data.state] || STATE_CONFIG.idle;
       var title = data.title || data.basename || (data.agentId || "agent");
-      var html = '<div class="detail-header"><button class="detail-back">' + icon("arrowLeft") + '<span>' + esc(t("detail_back")) + '</span></button>';
+      var html = '<div class="detail-header"><button class="detail-back icon-only" aria-label="' + esc(t("detail_back")) + '">' + icon("arrowLeft") + '</button>';
       html += '<span class="detail-title">' + esc(title) + '</span></div>';
       html += '<div class="detail-body">';
 
