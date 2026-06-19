@@ -1115,9 +1115,29 @@ describe("buildStateBody — body-size guard (Stage A)", () => {
       { session_id: "sid-1", cwd: longCwd, tool_name: "Read", tool_input: { file_path: "a" }, transcript_path: file },
       mockResolve
     );
-    const size = JSON.stringify(body).length;
+    const size = Buffer.byteLength(JSON.stringify(body), "utf8");
     assert.ok(size < 4096, `body must stay under 4096 bytes (was ${size})`);
     // The guard sheds output (not cwd) and flags the truncation.
+    assert.strictEqual(body.cwd, longCwd);
+    assert.ok(typeof body.assistant_last_output === "string");
+    assert.strictEqual(body.assistant_last_output_truncated, true);
+  });
+
+  it("keeps the BYTE size under 4096 with multi-byte (CJK) cwd + output", () => {
+    // The server caps on Buffer bytes; CJK is 3 bytes/char, so a code-unit guard
+    // would under-count and let the body exceed 4096 bytes. This exercises that.
+    const longOutput = "你好世界".repeat(1500); // 6000 chars ≈ 18000 bytes
+    const file = writeTmpJsonl([
+      { type: "assistant", sessionId: "sid-1", message: { content: longOutput } },
+    ]);
+    const longCwd = "/项目/深层/路径".repeat(120); // multi-byte cwd, ~960 chars / ~2880 bytes
+    const body = buildStateBody(
+      "PreToolUse",
+      { session_id: "sid-1", cwd: longCwd, tool_name: "Read", tool_input: { file_path: "a" }, transcript_path: file },
+      mockResolve
+    );
+    const bytes = Buffer.byteLength(JSON.stringify(body), "utf8");
+    assert.ok(bytes < 4096, `body must stay under 4096 BYTES (was ${bytes})`);
     assert.strictEqual(body.cwd, longCwd);
     assert.ok(typeof body.assistant_last_output === "string");
     assert.strictEqual(body.assistant_last_output_truncated, true);

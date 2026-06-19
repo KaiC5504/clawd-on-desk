@@ -499,13 +499,16 @@ function buildStateBody(event, payload, resolve) {
 // host/etc. A long cwd plus a max-length output can push the JSON over the limit
 // and trip a 413. Shed chars from assistant_last_output (the largest, most
 // elastic field) until the whole body fits under the soft limit; if it can't,
-// drop the field entirely rather than risk the body being rejected.
+// drop the field entirely rather than risk the body being rejected. The cap is a
+// BYTE limit on the server (it counts Buffer bytes), so measure bytes here too —
+// a code-unit count under-estimates multi-byte CJK/emoji and would let a >4096-
+// byte body slip through.
 function trimBodyToFit(body) {
   if (typeof body.assistant_last_output !== "string") return;
-  while (JSON.stringify(body).length > BODY_SIZE_SOFT_LIMIT) {
+  while (Buffer.byteLength(JSON.stringify(body), "utf8") > BODY_SIZE_SOFT_LIMIT) {
     const text = body.assistant_last_output;
     if (!text) { delete body.assistant_last_output; delete body.assistant_last_output_truncated; return; }
-    const over = JSON.stringify(body).length - BODY_SIZE_SOFT_LIMIT;
+    const over = Buffer.byteLength(JSON.stringify(body), "utf8") - BODY_SIZE_SOFT_LIMIT;
     const cut = Math.max(16, over);
     const next = text.slice(0, Math.max(0, text.length - cut));
     if (next === text) { delete body.assistant_last_output; delete body.assistant_last_output_truncated; return; }

@@ -789,8 +789,10 @@ function initMobilePreviewServer(ctx) {
     }
     const enriched = !!(meta && canViewTranscript(meta));
     if (typeof session.assistantLastOutput === "string" && session.assistantLastOutput) {
+      // Redact the FULL stored string before slicing — slicing first could chop a
+      // secret's tail, leaving a sub-threshold prefix that escapes the redactor.
       const cap = enriched ? 3000 : 800;
-      out.lastOutput = redactSecrets(session.assistantLastOutput.slice(0, cap));
+      out.lastOutput = redactSecrets(session.assistantLastOutput).slice(0, cap);
     }
     if (enriched) {
       if (typeof session.currentTool === "string" && session.currentTool) {

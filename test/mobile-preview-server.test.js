@@ -1442,6 +1442,26 @@ describe("Mobile Preview — transcript-gated + redacted detail (Stage A)", () =
     await new Promise((r) => setTimeout(r, 100));
   });
 
+  it("redacts a secret that straddles the conservative 800-char cut (redact-before-slice)", async () => {
+    await freshServer();
+    // Position a fake sk- token so the 800-char cut would leave only a short,
+    // sub-threshold prefix — which slice-then-redact would let through. Spaced
+    // prose keeps the long-blob rule from firing on the filler.
+    const surviving = "sk-FAKE12345";                 // 'sk-' + 9 chars, below the {16,} token threshold
+    const filler = "word ".repeat((800 - surviving.length) / 5);
+    const secrety = filler + surviving + "MORECHARSXYZ0123456789 done";
+    setSession("s-straddle", { assistantLastOutput: secrety });
+
+    const tokenClient = connectWithCredential(port, { token });
+    await waitForOpen(tokenClient.ws);
+    await tokenClient.waitFor("snapshot");
+    tokenClient.send({ type: "request_detail", sessionId: "s-straddle" });
+    const detail = await tokenClient.waitFor("detail");
+    assert.ok(!/sk-FAKE/.test(detail.data.lastOutput), "straddling secret fragment leaked past the 800 cut");
+    tokenClient.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
   it("broadcastDetail pushes a fresh detail to a focused client after a snapshot change", async () => {
     await freshServer();
     setSession("s-live", { assistantLastOutput: "first output", currentTool: "Read", toolSummary: "a.js" });
