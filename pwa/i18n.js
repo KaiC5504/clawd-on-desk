@@ -52,6 +52,18 @@
     detail_back:        { en: "Back", zh: "返回", "zh-TW": "返回", ko: "뒤로", ja: "戻る" },
     detail_loading:     { en: "Loading…", zh: "加载中…", "zh-TW": "載入中…", ko: "불러오는 중…", ja: "読み込み中…" },
 
+    // ── Live chat transcript ──
+    chat_loading:       { en: "Loading conversation…", zh: "正在加载对话…", "zh-TW": "正在載入對話…", ko: "대화를 불러오는 중…", ja: "会話を読み込み中…" },
+    chat_load_older:    { en: "Load older messages", zh: "加载更早的消息", "zh-TW": "載入更早的訊息", ko: "이전 메시지 불러오기", ja: "以前のメッセージを読み込む" },
+    chat_jump_latest:   { en: "Jump to latest", zh: "跳到最新", "zh-TW": "跳到最新", ko: "최신으로 이동", ja: "最新へ移動" },
+    chat_thinking:      { en: "Thought for a moment", zh: "思考了一会儿", "zh-TW": "思考了一會兒", ko: "잠시 생각함", ja: "少し考えました" },
+    chat_tool_output_hidden: { en: "Output hidden — enable in desktop settings", zh: "输出已隐藏 — 请在桌面端设置中开启", "zh-TW": "輸出已隱藏 — 請在桌面端設定中開啟", ko: "출력 숨김 — 데스크톱 설정에서 활성화하세요", ja: "出力は非表示 — デスクトップ設定で有効にしてください" },
+    chat_you:           { en: "You", zh: "你", "zh-TW": "你", ko: "나", ja: "あなた" },
+    chat_empty:         { en: "No messages yet", zh: "暂无消息", "zh-TW": "尚無訊息", ko: "아직 메시지가 없습니다", ja: "まだメッセージはありません" },
+    chat_unavailable_disabled:    { en: "The transcript view is turned off in desktop settings", zh: "桌面端设置中已关闭对话记录视图", "zh-TW": "桌面端設定中已關閉對話記錄檢視", ko: "데스크톱 설정에서 대화 기록 보기가 꺼져 있습니다", ja: "デスクトップ設定で会話記録ビューが無効になっています" },
+    chat_unavailable_not_allowed: { en: "This device isn't allowed to view transcripts", zh: "此设备无权查看对话记录", "zh-TW": "此裝置無權檢視對話記錄", ko: "이 기기는 대화 기록을 볼 수 없습니다", ja: "この端末は会話記録を閲覧できません" },
+    chat_unavailable_insecure:    { en: "Enable Secure (HTTPS) on the desktop to view the transcript from this device", zh: "需在桌面端启用安全连接 (HTTPS) 后才能在此设备查看对话记录", "zh-TW": "需在桌面端啟用安全連線 (HTTPS) 後才能在此裝置檢視對話記錄", ko: "이 기기에서 대화 기록을 보려면 데스크톱에서 보안 연결(HTTPS)을 활성화하세요", ja: "この端末で会話記録を表示するにはデスクトップで安全な接続 (HTTPS) を有効にしてください" },
+
     // ── Notifications ──
     notif_section:      { en: "Notifications", zh: "通知", "zh-TW": "通知", ko: "알림", ja: "通知" },
     notif_enable:       { en: "Enable notifications", zh: "开启推送通知", "zh-TW": "開啟推播通知", ko: "알림 켜기", ja: "通知を有効にする" },

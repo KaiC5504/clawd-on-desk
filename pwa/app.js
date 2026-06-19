@@ -1582,6 +1582,353 @@
     }
   }
 
+  // === ChatRenderer ===
+
+  // The live chat transcript view. Shares the #detail-overlay container (z 1500)
+  // with DetailRenderer — they're mutually exclusive, only one open at a time.
+  // Brand-new class (not a DetailRenderer subclass): the snapshot rebuilds the
+  // body once, but live deltas appendChild single nodes — re-innerHTML'ing the
+  // whole body on every delta is the perf cliff (it drops scroll + selection).
+  var CHAT_MAX_ENTRIES = 800;       // DOM hard cap — drop oldest past this (no virtual scroll)
+  var CHAT_STICKY_PX = 80;          // "near the bottom" threshold for sticky auto-scroll
+
+  class ChatRenderer {
+    constructor(container, opts) {
+      this.container = container;
+      opts = opts || {};
+      this.send = opts.send || function () {};
+      this.onFallback = null;       // (sessionId) => fall back to the detail screen
+      this.sessionId = null;
+      this.toolOutput = false;
+      this.hasMore = false;
+      this.seen = new Set();        // entry uuids already in the DOM (dedupe)
+      this.bodyEl = null;
+      this.jumpEl = null;
+      this._bindSwipe();
+    }
+
+    isOpen() { return this.sessionId !== null; }
+
+    open(sessionId) {
+      this._resetSwipeStyles();
+      this.sessionId = sessionId;
+      this.toolOutput = false;
+      this.hasMore = false;
+      this.seen = new Set();
+      this.container.classList.remove("hidden");
+      this._renderShell(t("chat_loading"));
+    }
+
+    close() {
+      this._resetSwipeStyles();
+      var sid = this.sessionId;
+      this.sessionId = null;
+      this.bodyEl = null;
+      this.jumpEl = null;
+      this.container.classList.add("hidden");
+      this.container.innerHTML = "";
+      if (sid) this.send({ type: "unsubscribe_transcript", sessionId: sid });
+    }
+
+    // ── server message handlers (App routes these; each is already sessionId-matched) ──
+
+    onSnapshot(msg) {
+      this.toolOutput = !!msg.toolOutput;
+      this.hasMore = !!msg.hasMore;
+      this.seen = new Set();
+      this._renderShell(null);
+      var entries = Array.isArray(msg.entries) ? msg.entries : [];
+      if (entries.length === 0) {
+        this._setBody('<div class="chat-empty">' + esc(t("chat_empty")) + '</div>');
+        return;
+      }
+      var frag = document.createDocumentFragment();
+      for (var i = 0; i < entries.length; i++) {
+        var node = this._buildEntry(entries[i]);
+        if (node) frag.appendChild(node);
+      }
+      this.bodyEl.appendChild(frag);
+      this._syncLoadOlder();
+      this._scrollToBottom();
+    }
+
+    onDelta(msg) {
+      if (!this.bodyEl) return;
+      var entries = Array.isArray(msg.entries) ? msg.entries : [];
+      var empty = this.bodyEl.querySelector(".chat-empty");
+      if (empty && entries.length) empty.remove();
+      var stick = this._atBottom();
+      var added = false;
+      for (var i = 0; i < entries.length; i++) {
+        var node = this._buildEntry(entries[i]);
+        if (!node) continue;            // already seen (deduped) — never double-render
+        node.classList.add("chat-enter");
+        this.bodyEl.appendChild(node);
+        added = true;
+      }
+      if (!added) return;
+      this._trimToCap();
+      if (stick) this._scrollToBottom();
+      else this._showJump();
+    }
+
+    onResultPatch(msg) {
+      if (!this.bodyEl) return;
+      var id = msg.tool_use_id == null ? "" : String(msg.tool_use_id);
+      var chip = this.bodyEl.querySelector('.chat-tool-chip[data-tool-use-id="' + (window.CSS && CSS.escape ? CSS.escape(id) : id) + '"]');
+      if (!chip) return;
+      this._paintChip(chip, msg.status, msg.meta, msg.output);
+    }
+
+    onOlder(msg) {
+      if (!this.bodyEl) return;
+      this.hasMore = !!msg.hasMore;
+      var entries = Array.isArray(msg.entries) ? msg.entries : [];
+      // Prepend while preserving the viewport: measure scroll height before/after
+      // and re-anchor scrollTop so the rows the user was reading don't jump.
+      var before = this.bodyEl.scrollHeight;
+      var anchor = this.bodyEl.scrollTop;
+      var frag = document.createDocumentFragment();
+      for (var i = 0; i < entries.length; i++) {
+        var node = this._buildEntry(entries[i]);
+        if (node) frag.appendChild(node);
+      }
+      var first = this.bodyEl.querySelector(".chat-msg, .chat-empty");
+      this.bodyEl.insertBefore(frag, first || null);
+      this.bodyEl.scrollTop = anchor + (this.bodyEl.scrollHeight - before);
+      this._syncLoadOlder();
+    }
+
+    onUnavailable(msg) {
+      var reason = msg && msg.reason;
+      if (reason === "insecure") {
+        this._renderShell(null);
+        this._setBody('<div class="chat-notice">' + esc(t("chat_unavailable_insecure")) + '</div>');
+        return;
+      }
+      // disabled / not-allowed / no-path → today's detail screen is the right surface.
+      var sid = this.sessionId;
+      var keyByReason = { disabled: "chat_unavailable_disabled", "not-allowed": "chat_unavailable_not_allowed" };
+      if (keyByReason[reason]) showToast(t(keyByReason[reason]), "info");
+      this.sessionId = null;          // close without re-subscribing (no unsubscribe send)
+      this.bodyEl = null; this.jumpEl = null;
+      this._resetSwipeStyles();
+      this.container.classList.add("hidden");
+      this.container.innerHTML = "";
+      if (this.onFallback && sid) this.onFallback(sid);
+    }
+
+    // ── rendering ──
+
+    _renderShell(loadingText) {
+      var self = this;
+      // chat-back keeps it distinct from the detail screen's back button (same
+      // .detail-back.icon-only styling, but its own surface).
+      var head = '<div class="detail-header chat-header">'
+        + '<button class="detail-back icon-only chat-back" aria-label="' + esc(t("detail_back")) + '">' + icon("arrowLeft") + '</button>'
+        + '<span class="detail-title chat-title">' + icon("messageCircle") + '</span></div>';
+      var body = '<div class="detail-body chat-body"></div>';
+      var jump = '<button class="chat-jump-latest hidden">' + esc(t("chat_jump_latest")) + '</button>';
+      this.container.innerHTML = head + body + jump;
+      this.bodyEl = this.container.querySelector(".chat-body");
+      this.jumpEl = this.container.querySelector(".chat-jump-latest");
+      this.container.querySelector(".detail-back").addEventListener("click", function () { self.close(); });
+      this.jumpEl.addEventListener("click", function () { self._scrollToBottom(); self._hideJump(); });
+      this.bodyEl.addEventListener("scroll", function () { if (self._atBottom()) self._hideJump(); });
+      if (loadingText) this._setBody('<div class="chat-empty">' + esc(loadingText) + '</div>');
+    }
+
+    _setBody(html) { if (this.bodyEl) this.bodyEl.innerHTML = html; }
+
+    // Build the DOM node for one entry, or null if its uuid was already rendered.
+    _buildEntry(entry) {
+      if (!entry || !entry.uuid || this.seen.has(entry.uuid)) return null;
+      this.seen.add(entry.uuid);
+      var isUser = entry.role === "user";
+      var row = document.createElement("div");
+      row.className = "chat-msg " + (isUser ? "chat-msg-user" : "chat-msg-assistant");
+      // The bubble side is the only visual role cue, so name the speaker for screen readers.
+      row.setAttribute("aria-label", isUser ? t("chat_you") : "Claude");
+      if (entry.cursor) row.setAttribute("data-cursor", entry.cursor);
+      var blocks = Array.isArray(entry.blocks) ? entry.blocks : [];
+      var html = "";
+      for (var i = 0; i < blocks.length; i++) {
+        var b = blocks[i];
+        if (!b) continue;
+        if (b.kind === "text") {
+          // assistant text is markdown; user text is plain (esc) — raw user markup never renders.
+          html += isUser
+            ? '<div class="chat-text">' + esc(b.text || "") + '</div>'
+            : '<div class="chat-text approval-md">' + mdToHtml(b.text || "") + '</div>';
+        } else if (b.kind === "thinking") {
+          html += this._thinkingHtml(b.text || "");
+        } else if (b.kind === "tool_use") {
+          html += this._chipHtml(b);
+        }
+      }
+      row.innerHTML = html;
+      this._bindChips(row);
+      return row;
+    }
+
+    _thinkingHtml(text) {
+      return '<details class="chat-thinking"><summary class="chat-thinking-summary">'
+        + esc(t("chat_thinking")) + '</summary><div class="chat-thinking-body">' + esc(text) + '</div></details>';
+    }
+
+    _chipHtml(b) {
+      var label = (b.name || "") + (b.target ? " " + b.target : "");
+      var statusClass = b.status === "error" ? "error" : (b.status === "done" ? "done" : "running");
+      var hasOutput = this.toolOutput && b.output !== undefined;
+      var html = '<div class="chat-tool-chip ' + statusClass + '" data-tool-use-id="' + esc(b.tool_use_id || "") + '">';
+      html += '<button class="chat-chip-head" type="button">' + icon("tool")
+        + '<span class="chat-chip-label">' + esc(label) + '</span>'
+        + '<span class="chat-chip-meta">' + esc(this._chipMeta(b.status, b.meta)) + '</span></button>';
+      html += '<div class="chat-tool-output hidden">' + (hasOutput ? '<pre>' + esc(b.output) + '</pre>' : '<span class="chat-output-hidden">' + esc(t("chat_tool_output_hidden")) + '</span>') + '</div>';
+      html += '</div>';
+      return html;
+    }
+
+    _chipMeta(status, meta) {
+      meta = meta || {};
+      if (status === "running") return "…";
+      if (meta.interrupted) return "interrupted";
+      if (status === "error" || meta.ok === false) return "failed";
+      if (typeof meta.lines === "number") return "ok · " + meta.lines + " lines";
+      return "ok";
+    }
+
+    _bindChips(scope) {
+      var els = scope.querySelectorAll(".chat-tool-chip");
+      for (var i = 0; i < els.length; i++) {
+        (function (chip) {
+          var head = chip.querySelector(".chat-chip-head");
+          var out = chip.querySelector(".chat-tool-output");
+          if (head && out) head.addEventListener("click", function () { out.classList.toggle("hidden"); });
+        })(els[i]);
+      }
+    }
+
+    // Update a running chip in place when its tool result lands.
+    _paintChip(chip, status, meta, output) {
+      chip.classList.remove("running", "done", "error");
+      chip.classList.add(status === "error" ? "error" : (status === "done" ? "done" : "running"));
+      var metaEl = chip.querySelector(".chat-chip-meta");
+      if (metaEl) metaEl.textContent = this._chipMeta(status, meta);
+      var out = chip.querySelector(".chat-tool-output");
+      if (!out) return;
+      if (this.toolOutput && output !== undefined) {
+        var pre = document.createElement("pre");
+        pre.textContent = output;
+        out.innerHTML = "";
+        out.appendChild(pre);
+      } else if (!this.toolOutput) {
+        out.innerHTML = '<span class="chat-output-hidden">' + esc(t("chat_tool_output_hidden")) + '</span>';
+      }
+    }
+
+    // ── scrollback / sticky-scroll / cap ──
+
+    _syncLoadOlder() {
+      if (!this.bodyEl) return;
+      var existing = this.bodyEl.querySelector(".chat-load-older");
+      if (this.hasMore && !existing) {
+        var self = this;
+        var btn = document.createElement("button");
+        btn.className = "chat-load-older";
+        btn.type = "button";
+        btn.textContent = t("chat_load_older");
+        btn.addEventListener("click", function () { self._requestOlder(); });
+        this.bodyEl.insertBefore(btn, this.bodyEl.firstChild);
+      } else if (!this.hasMore && existing) {
+        existing.remove();
+      }
+    }
+
+    _requestOlder() {
+      var oldest = this.bodyEl ? this.bodyEl.querySelector(".chat-msg") : null;
+      var cursor = oldest ? oldest.getAttribute("data-cursor") : null;
+      if (!cursor || !this.sessionId) return;
+      this.send({ type: "request_older_transcript", sessionId: this.sessionId, beforeCursor: cursor, count: 50 });
+    }
+
+    _trimToCap() {
+      if (!this.bodyEl) return;
+      var msgs = this.bodyEl.querySelectorAll(".chat-msg");
+      var over = msgs.length - CHAT_MAX_ENTRIES;
+      for (var i = 0; i < over; i++) msgs[i].remove();
+    }
+
+    _atBottom() {
+      if (!this.bodyEl) return true;
+      return this.bodyEl.scrollHeight - this.bodyEl.scrollTop - this.bodyEl.clientHeight < CHAT_STICKY_PX;
+    }
+
+    _scrollToBottom() { if (this.bodyEl) this.bodyEl.scrollTop = this.bodyEl.scrollHeight; }
+    _showJump() { if (this.jumpEl) this.jumpEl.classList.remove("hidden"); }
+    _hideJump() { if (this.jumpEl) this.jumpEl.classList.add("hidden"); }
+
+    // ── iOS edge-swipe back (mirrors DetailRenderer) ──
+    _bindSwipe() {
+      var self = this;
+      var EDGE = 40;
+      var TRIGGER = 0.32;
+      var startX = 0, startY = 0, dx = 0, width = 1;
+      var tracking = false, dragging = false, settleToken = 0;
+
+      this.container.addEventListener("touchstart", function (e) {
+        if (self.sessionId === null || e.touches.length !== 1) return;
+        var x = e.touches[0].clientX;
+        if (x > EDGE) return;
+        tracking = true; dragging = false; dx = 0;
+        startX = x; startY = e.touches[0].clientY;
+        width = self.container.offsetWidth || window.innerWidth || 1;
+        settleToken++;
+        self.container.style.transition = "none";
+      }, { passive: true });
+
+      this.container.addEventListener("touchmove", function (e) {
+        if (!tracking) return;
+        dx = e.touches[0].clientX - startX;
+        var dy = e.touches[0].clientY - startY;
+        if (!dragging) {
+          if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+          if (dx <= 0 || Math.abs(dy) > Math.abs(dx)) { tracking = false; return; }
+          dragging = true;
+        }
+        if (dx < 0) dx = 0;
+        e.preventDefault();
+        self.container.style.transform = "translateX(" + dx + "px)";
+        self.container.style.opacity = String(1 - Math.min(dx / width, 1) * 0.3);
+      }, { passive: false });
+
+      function settle() {
+        if (!tracking) return;
+        tracking = false;
+        var committed = dragging && dx > width * TRIGGER;
+        var token = ++settleToken;
+        var capturedId = self.sessionId;
+        self.container.style.transition = "transform 0.2s ease-out, opacity 0.2s ease-out";
+        self.container.style.transform = committed ? "translateX(100%)" : "translateX(0)";
+        self.container.style.opacity = committed ? "0" : "1";
+        dragging = false;
+        window.setTimeout(function () {
+          if (token !== settleToken) return;
+          if (committed && self.sessionId === capturedId) self.close();
+          else if (!committed) self._resetSwipeStyles();
+        }, 200);
+      }
+      this.container.addEventListener("touchend", settle);
+      this.container.addEventListener("touchcancel", settle);
+    }
+
+    _resetSwipeStyles() {
+      this.container.style.transition = "";
+      this.container.style.transform = "";
+      this.container.style.opacity = "";
+    }
+  }
+
   // === PushController ===
 
   class PushController {
@@ -1666,6 +2013,10 @@
       this.settingsRenderer = new SettingsRenderer(document.getElementById("settings-content"));
       this.approvals = new ApprovalRenderer(document.getElementById("approval-list"), document.getElementById("approval-modal"));
       this.detail = new DetailRenderer(document.getElementById("detail-overlay"));
+      // ChatRenderer shares the same overlay container; the two are mutually exclusive.
+      this.chat = new ChatRenderer(document.getElementById("detail-overlay"), {
+        send: (msg) => this.connection.send(msg),
+      });
       this.push = new PushController(this.connection);
       this.notifier = new NotificationManager();
       this.scanner = (typeof window.QrScanner === "function") ? new window.QrScanner() : null;
@@ -1715,6 +2066,18 @@
     _bindDetail() {
       var self = this;
       this.renderer.onSelect = function(sid) {
+        var session = self.renderer.sessions.get(sid);
+        if (session && session.hasTranscript) {
+          self.chat.open(sid);
+          self.connection.send({ type: "subscribe_transcript", sessionId: sid });
+        } else {
+          self.detail.open(sid);
+          self.connection.send({ type: "request_detail", sessionId: sid });
+        }
+      };
+      // When the transcript is off / not allowed / pathless, drop the chat view and
+      // open today's detail panel instead (close() already ran without re-subscribing).
+      this.chat.onFallback = function(sid) {
         self.detail.open(sid);
         self.connection.send({ type: "request_detail", sessionId: sid });
       };
@@ -1922,7 +2285,11 @@
         if (msg.type === "snapshot") { self.renderer.updateFromSnapshot(msg.sessions || {}); log("Snapshot: " + Object.keys(msg.sessions || {}).length + " sessions"); }
         else if (msg.type === "state") { self.renderer.updateState(msg.sessionId, msg.data); self.notifier.onStateChange(msg.sessionId, msg.data); }
         else if (msg.type === "session_deleted") { self.renderer.removeSession(msg.sessionId); }
-        else if (msg.type === "tool_output") { var sid = msg.sessionId; var session = self.renderer.sessions.get(sid); if (session) { session.lastOutput = { toolName: msg.data.toolName, output: (msg.data.output || "").substring(0, 200), at: msg.timestamp || Date.now() }; self.renderer.render(); } }
+        else if (msg.type === "transcript_snapshot") { if (msg.sessionId !== self.chat.sessionId) return; self.chat.onSnapshot(msg); }
+        else if (msg.type === "transcript_delta") { if (msg.sessionId !== self.chat.sessionId) return; self.chat.onDelta(msg); }
+        else if (msg.type === "transcript_result_patch") { if (msg.sessionId !== self.chat.sessionId) return; self.chat.onResultPatch(msg); }
+        else if (msg.type === "transcript_older") { if (msg.sessionId !== self.chat.sessionId) return; self.chat.onOlder(msg); }
+        else if (msg.type === "transcript_unavailable") { if (msg.sessionId !== self.chat.sessionId) return; self.chat.onUnavailable(msg); }
         else if (msg.type === "token_rotate") {
           var newToken = msg.newToken;
           if (newToken && self.connection.config) {
