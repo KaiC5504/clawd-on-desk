@@ -111,6 +111,20 @@ describe("key/value pairs", () => {
     assert.ok(out.includes(PLACEHOLDER));
   });
 
+  it("redacts the FULL Authorization credential past the scheme word", () => {
+    // \S+ stops at the first space and would leak the short base64 credential.
+    const out = redactSecrets("Authorization: Basic dXNlcjpwYXNzFAKE");
+    assert.ok(out.startsWith("Authorization:"));
+    assert.ok(!out.includes("dXNlcjpwYXNzFAKE"));
+    assert.ok(out.includes(PLACEHOLDER));
+  });
+
+  it("does not consume across newlines for Authorization", () => {
+    const out = redactSecrets("Authorization: Basic dXNlcjpwYXNzFAKE\nnext line stays");
+    assert.ok(out.endsWith("\nnext line stays"));
+    assert.ok(!out.includes("dXNlcjpwYXNzFAKE"));
+  });
+
   it("redacts client_secret= value, keeps key", () => {
     const out = redactSecrets("client_secret=FAKEsecretvalue1234567890");
     assert.ok(out.startsWith("client_secret="));

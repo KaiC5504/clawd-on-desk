@@ -21,11 +21,17 @@ const RE_TOKENS = [
   /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,
 ];
 
+// Authorization headers carry a scheme word before the credential (e.g.
+// `Basic dXNlcjpwYXNz`); a `\S+` value would stop at the space and leak the
+// credential. Redact the rest of the line instead. Over-redacting that line is
+// intended. `[^\n\r]` keeps it from crossing into the next line.
+const RE_AUTHORIZATION = /(authorization)\s*[:=]\s*[^\n\r]+/gi;
+
 // key=value and key: value forms — keep key, redact value.
 // The lookahead on the value side is `\S+`; the replacement uses a capture group
 // for the key portion.
 const RE_KV =
-  /(api[_-]?key|secret|token|password|passwd|authorization|access[_-]?token|refresh[_-]?token|client[_-]?secret)\s*[:=]\s*\S+/gi;
+  /(api[_-]?key|secret|token|password|passwd|access[_-]?token|refresh[_-]?token|client[_-]?secret)\s*[:=]\s*\S+/gi;
 
 // Bearer/Token auth headers — keep the keyword.
 const RE_BEARER = /\b(Bearer|Token)\s+[A-Za-z0-9._~+/=:-]{12,}/gi;
@@ -48,6 +54,12 @@ function redactSecrets(text) {
     re.lastIndex = 0;
     out = out.replace(re, PLACEHOLDER);
   }
+
+  // Authorization: redact the whole credential (scheme word included).
+  out = out.replace(RE_AUTHORIZATION, (match, key) => {
+    const sep = match.slice(key.length).match(/\s*[:=]\s*/)[0];
+    return `${key}${sep}${PLACEHOLDER}`;
+  });
 
   // Key/value pairs: replace the value portion only.
   // The regex captures the key; we rebuild "key= [redacted]" (preserving the
