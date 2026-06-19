@@ -47,6 +47,7 @@
     detail_context:     { en: "Context usage", zh: "上下文用量", "zh-TW": "上下文用量", ko: "컨텍스트 사용량", ja: "コンテキスト使用量" },
     detail_output:      { en: "Recent output", zh: "最近输出", "zh-TW": "最近輸出", ko: "최근 출력", ja: "最近の出力" },
     detail_events:      { en: "Recent events", zh: "最近事件", "zh-TW": "最近事件", ko: "최근 이벤트", ja: "最近のイベント" },
+    detail_now:         { en: "now:", zh: "正在:", "zh-TW": "正在:", ko: "지금:", ja: "実行中:" },
     detail_focus:       { en: "Focus on desktop", zh: "在桌面端聚焦", "zh-TW": "在桌面端聚焦", ko: "데스크톱에서 포커스", ja: "デスクトップでフォーカス" },
     detail_back:        { en: "Back", zh: "返回", "zh-TW": "返回", ko: "뒤로", ja: "戻る" },
     detail_loading:     { en: "Loading…", zh: "加载中…", "zh-TW": "載入中…", ko: "불러오는 중…", ja: "読み込み中…" },

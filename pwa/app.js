@@ -1527,6 +1527,9 @@
 
       html += '<div class="detail-block"><div class="detail-block-label">' + esc(data.agentId ? data.agentId.toUpperCase() : "AGENT") + ' &middot; ' + esc(t(config.labelKey)) + '</div>';
       if (data.model) html += '<div class="detail-model">' + esc(data.model) + '</div>';
+      if (data.currentTool) {
+        html += '<div class="detail-now">' + esc(t("detail_now")) + ' ' + esc(data.currentTool) + (data.toolSummary ? ' ' + esc(data.toolSummary) : '') + '</div>';
+      }
       html += '</div>';
 
       if (data.contextUsage) html += this._renderContext(data.contextUsage);
@@ -1547,7 +1550,7 @@
 
       if (data.lastOutput) {
         html += '<div class="detail-block"><div class="detail-block-label">' + esc(t("detail_output")) + '</div>';
-        html += '<div class="detail-output">' + esc(data.lastOutput) + '</div></div>';
+        html += '<div class="detail-output approval-md">' + mdToHtml(data.lastOutput) + '</div></div>';
       }
 
       if (data.canFocus) {
