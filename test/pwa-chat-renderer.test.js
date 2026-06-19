@@ -75,6 +75,13 @@ describe("pwa chat renderer — onMessage routing", () => {
   it("removes the orphan tool_output consumer (no producer in src/)", () => {
     assert.doesNotMatch(app, /msg\.type === "tool_output"/);
   });
+
+  it("re-subscribes the chat on WS reconnect (onOpen) so the live view doesn't freeze", () => {
+    const onOpen = app.match(/this\.connection\.onOpen = function\(\) \{[\s\S]*?\n {6}\};/)?.[0] || "";
+    assert.ok(onOpen, "onOpen handler must exist");
+    assert.match(onOpen, /self\.chat\.isOpen\(\)/);
+    assert.match(onOpen, /type: "subscribe_transcript", sessionId: self\.chat\.sessionId/);
+  });
 });
 
 describe("pwa chat renderer — snapshot rebuilds once, deltas append, older prepends", () => {
@@ -127,6 +134,17 @@ describe("pwa chat renderer — bubble + block rendering", () => {
   it("thinking renders as a collapsed disclosure", () => {
     assert.match(CHAT, /<details class="chat-thinking">/);
     assert.match(CHAT, /t\("chat_thinking"\)/);
+  });
+
+  it("tool-chip meta labels come from t() (no hardcoded English)", () => {
+    const meta = CHAT.match(/_chipMeta\(status, meta\) \{[\s\S]*?\n {4}\}/)?.[0] || "";
+    assert.ok(meta, "_chipMeta must exist");
+    assert.match(meta, /t\("chat_meta_interrupted"\)/);
+    assert.match(meta, /t\("chat_meta_failed"\)/);
+    assert.match(meta, /t\("chat_meta_ok_lines", \{ n: meta\.lines \}\)/);
+    assert.match(meta, /t\("chat_meta_ok"\)/);
+    // The previously-hardcoded English phrasings must be gone from the method.
+    assert.doesNotMatch(meta, /"failed"|"interrupted"|ok · /);
   });
 });
 
@@ -190,6 +208,7 @@ describe("pwa chat renderer — i18n keys present for every language", () => {
     "chat_loading", "chat_load_older", "chat_jump_latest", "chat_thinking",
     "chat_tool_output_hidden", "chat_you", "chat_empty",
     "chat_unavailable_disabled", "chat_unavailable_not_allowed", "chat_unavailable_insecure",
+    "chat_meta_ok", "chat_meta_ok_lines", "chat_meta_failed", "chat_meta_interrupted",
   ];
   for (const key of keys) {
     it(`${key} exists for all 5 languages`, () => {

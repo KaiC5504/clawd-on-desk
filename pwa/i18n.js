@@ -63,6 +63,10 @@
     chat_unavailable_disabled:    { en: "The transcript view is turned off in desktop settings", zh: "桌面端设置中已关闭对话记录视图", "zh-TW": "桌面端設定中已關閉對話記錄檢視", ko: "데스크톱 설정에서 대화 기록 보기가 꺼져 있습니다", ja: "デスクトップ設定で会話記録ビューが無効になっています" },
     chat_unavailable_not_allowed: { en: "This device isn't allowed to view transcripts", zh: "此设备无权查看对话记录", "zh-TW": "此裝置無權檢視對話記錄", ko: "이 기기는 대화 기록을 볼 수 없습니다", ja: "この端末は会話記録を閲覧できません" },
     chat_unavailable_insecure:    { en: "Enable Secure (HTTPS) on the desktop to view the transcript from this device", zh: "需在桌面端启用安全连接 (HTTPS) 后才能在此设备查看对话记录", "zh-TW": "需在桌面端啟用安全連線 (HTTPS) 後才能在此裝置檢視對話記錄", ko: "이 기기에서 대화 기록을 보려면 데스크톱에서 보안 연결(HTTPS)을 활성화하세요", ja: "この端末で会話記録を表示するにはデスクトップで安全な接続 (HTTPS) を有効にしてください" },
+    chat_meta_ok:            { en: "ok", zh: "完成", "zh-TW": "完成", ko: "완료", ja: "完了" },
+    chat_meta_ok_lines:      { en: "ok · {n} lines", zh: "完成 · {n} 行", "zh-TW": "完成 · {n} 行", ko: "완료 · {n}줄", ja: "完了 · {n} 行" },
+    chat_meta_failed:        { en: "failed", zh: "失败", "zh-TW": "失敗", ko: "실패", ja: "失敗" },
+    chat_meta_interrupted:   { en: "interrupted", zh: "已中断", "zh-TW": "已中斷", ko: "중단됨", ja: "中断" },
 
     // ── Notifications ──
     notif_section:      { en: "Notifications", zh: "通知", "zh-TW": "通知", ko: "알림", ja: "通知" },

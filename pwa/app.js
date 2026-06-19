@@ -1792,10 +1792,10 @@
     _chipMeta(status, meta) {
       meta = meta || {};
       if (status === "running") return "…";
-      if (meta.interrupted) return "interrupted";
-      if (status === "error" || meta.ok === false) return "failed";
-      if (typeof meta.lines === "number") return "ok · " + meta.lines + " lines";
-      return "ok";
+      if (meta.interrupted) return t("chat_meta_interrupted");
+      if (status === "error" || meta.ok === false) return t("chat_meta_failed");
+      if (typeof meta.lines === "number") return t("chat_meta_ok_lines", { n: meta.lines });
+      return t("chat_meta_ok");
     }
 
     _bindChips(scope) {
@@ -2264,6 +2264,10 @@
         // A paired device may approve once reconnected; a snapshot will refine this.
         self.approvals.setApproveContext(self.connection.isPaired(), self.connection.isSecureConnection());
         if (self.connection.isPaired()) self.setUnpaired(false);
+        // The server tears down its transcript reader on disconnect (common on iOS
+        // when the PWA is backgrounded), so an open chat view would silently freeze.
+        // Re-subscribe; the re-snapshot is deduped by uuid client-side.
+        if (self.chat && self.chat.isOpen()) self.connection.send({ type: "subscribe_transcript", sessionId: self.chat.sessionId });
       };
       this.connection.onNeedsPairing = function() { self.setUnpaired(true); };
       this.connection.onCodeError = function() {
