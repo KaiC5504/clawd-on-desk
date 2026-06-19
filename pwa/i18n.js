@@ -30,6 +30,18 @@
     approval_deny:      { en: "Deny", zh: "拒绝", "zh-TW": "拒絕", ko: "거부", ja: "拒否" },
     approval_pair_hint: { en: "Pair this device in Settings to approve", zh: "需先在设置中配对设备才能审批", "zh-TW": "需先在設定中配對裝置才能審批", ko: "승인하려면 설정에서 이 기기를 페어링하세요", ja: "承認するには設定でこの端末をペアリングしてください" },
     approval_secure_hint: { en: "Enable Secure (HTTPS) on the desktop to approve from this device", zh: "需在桌面端启用安全连接 (HTTPS) 后才能在此设备审批", "zh-TW": "需在桌面端啟用安全連線 (HTTPS) 後才能在此裝置審批", ko: "이 기기에서 승인하려면 데스크톱에서 보안 연결(HTTPS)을 활성화하세요", ja: "この端末で承認するにはデスクトップで安全な接続 (HTTPS) を有効にしてください" },
+    approval_kind_question: { en: "Question", zh: "提问", "zh-TW": "提問", ko: "질문", ja: "質問" },
+    approval_kind_plan: { en: "Plan", zh: "计划", "zh-TW": "計畫", ko: "계획", ja: "計画" },
+    approval_pill_pending: { en: "{n} pending", zh: "{n} 个待处理", "zh-TW": "{n} 個待處理", ko: "{n}건 대기 중", ja: "{n} 件保留中" },
+    approval_back_to_menu: { en: "Back to menu", zh: "返回菜单", "zh-TW": "返回選單", ko: "메뉴로 돌아가기", ja: "メニューに戻る" },
+    approval_submit: { en: "Submit", zh: "提交", "zh-TW": "提交", ko: "제출", ja: "送信" },
+    approval_other: { en: "Other…", zh: "其他…", "zh-TW": "其他…", ko: "기타…", ja: "その他…" },
+    approval_other_placeholder: { en: "Type your answer", zh: "输入你的回答", "zh-TW": "輸入你的回答", ko: "답변을 입력하세요", ja: "回答を入力" },
+    approval_approve: { en: "Approve", zh: "批准", "zh-TW": "核准", ko: "승인", ja: "承認" },
+    approval_reject: { en: "Reject", zh: "拒绝", "zh-TW": "拒絕", ko: "거부", ja: "却下" },
+    approval_suggest_changes: { en: "Suggest changes", zh: "建议修改", "zh-TW": "建議修改", ko: "변경 제안", ja: "変更を提案" },
+    approval_feedback_placeholder: { en: "Describe the changes you'd like", zh: "描述你希望的修改", "zh-TW": "描述你希望的修改", ko: "원하는 변경 사항을 설명하세요", ja: "希望する変更を説明してください" },
+    approval_send_feedback: { en: "Send feedback", zh: "发送反馈", "zh-TW": "傳送回饋", ko: "피드백 보내기", ja: "フィードバックを送信" },
 
     // ── Session detail ──
     detail_context:     { en: "Context usage", zh: "上下文用量", "zh-TW": "上下文用量", ko: "컨텍스트 사용량", ja: "コンテキスト使用量" },

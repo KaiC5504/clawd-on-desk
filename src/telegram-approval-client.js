@@ -56,6 +56,12 @@ class TelegramApprovalClient {
     return !!(this.origin && this.token);
   }
 
+  // Telegram renders allow/deny only — it cannot answer questions, plan review,
+  // or free-text, so rich interaction kinds are never routed to it.
+  supportsRichInteractions() {
+    return false;
+  }
+
   requestApproval(payload, options = {}) {
     let body;
     try {

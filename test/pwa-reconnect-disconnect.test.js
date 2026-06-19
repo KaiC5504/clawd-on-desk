@@ -85,8 +85,26 @@ describe("pwa i18n — disconnect strings", () => {
 });
 
 describe("pwa service worker — cache bump for the new app.js/i18n.js", () => {
-  it("bumps CACHE_NAME to v15 so the updated assets ship to the installed PWA", () => {
-    assert.match(sw, /clawd-mobile-v15/, "CACHE_NAME must be bumped to v15");
-    assert.doesNotMatch(sw, /clawd-mobile-v14/, "old v14 cache name must be gone");
+  it("bumps CACHE_NAME to v17 so the updated assets ship to the installed PWA", () => {
+    assert.match(sw, /clawd-mobile-v17/, "CACHE_NAME must be bumped to v17");
+    assert.doesNotMatch(sw, /clawd-mobile-v16/, "old v16 cache name must be gone");
+  });
+});
+
+describe("pwa service worker — fetch strategy keeps assets fresh", () => {
+  it("serves the app shell stale-while-revalidate (cache, then background refresh)", () => {
+    // cache-first used to freeze old code; the new handler must refresh in the background.
+    assert.match(sw, /cache\.match\(req\)/, "must look up the cached asset");
+    assert.match(sw, /cache\.put\(req, response\.clone\(\)\)/, "must refresh the cache after fetching");
+    assert.match(sw, /return cached \|\| fresh/, "must answer from cache immediately, falling back to network");
+    assert.doesNotMatch(sw, /if \(cached\) return cached;/, "old pure cache-first branch must be gone");
+  });
+
+  it("never caches dynamic /api/ responses (pairing/connection state must stay live)", () => {
+    assert.match(sw, /req\.url\.includes\("\/api\/"\)\) return;/, "must bypass the cache for /api/ requests");
+  });
+
+  it("still bypasses WS and non-GET requests", () => {
+    assert.match(sw, /req\.method !== "GET" \|\| req\.url\.includes\("\/ws"\)\) return;/);
   });
 });

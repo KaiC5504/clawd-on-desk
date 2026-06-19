@@ -757,7 +757,14 @@ function initMobilePreviewServer(ctx) {
   // back to Claude Code. Payloads are ALREADY redacted by buildRemoteApprovalPayload.
 
   function approvalWire(payload) {
-    const wire = { kind: "approval", title: payload.title, detail: payload.detail };
+    const kind = payload.kind || "approval";
+    const wire = { kind, title: payload.title, detail: payload.detail || "" };
+    if (kind === "question") {
+      if (payload.header) wire.header = payload.header;
+      wire.questions = Array.isArray(payload.questions) ? payload.questions : [];
+    } else if (kind === "plan") {
+      wire.plan = payload.plan || "";
+    }
     if (Array.isArray(payload.suggestions) && payload.suggestions.length) {
       wire.suggestions = payload.suggestions;
     }

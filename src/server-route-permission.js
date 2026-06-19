@@ -275,7 +275,6 @@ function sendHermesPermissionNoDecision(res) {
 }
 
 function startRemoteApproval(ctx, permEntry) {
-  if (permEntry && permEntry.toolName === "ExitPlanMode") return;
   if (typeof ctx.maybeStartRemoteApproval !== "function") return;
   try {
     ctx.maybeStartRemoteApproval(permEntry);
@@ -1094,6 +1093,7 @@ function handlePermissionPost(req, res, options) {
         recordRequestHookEvent.accepted();
         try {
           ctx.showPermissionBubble(permEntry);
+          startRemoteApproval(ctx, permEntry);
         } catch (bubbleErr) {
           ctx.permLog(`elicitation bubble failed: ${bubbleErr && bubbleErr.message} -> terminal fallback`);
           removePendingPermission(ctx, permEntry, "elicitation-bubble-failed");

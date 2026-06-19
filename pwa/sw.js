@@ -1,4 +1,4 @@
-const CACHE_NAME = "clawd-mobile-v15";
+const CACHE_NAME = "clawd-mobile-v17";
 const STATIC_ASSETS = [
   "/mobile/",
   "/mobile/index.html",
@@ -29,24 +29,27 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("fetch", (event) => {
-  // WS 请求不拦截
-  if (event.request.url.includes("/ws")) return;
+  const req = event.request;
+  // WS 请求不拦截 — and only GET responses are cacheable.
+  if (req.method !== "GET" || req.url.includes("/ws")) return;
+  // Pairing / connection state must always be live; never serve it from cache.
+  if (req.url.includes("/api/")) return;
 
+  // Stale-while-revalidate for the app shell: answer instantly from cache, then
+  // refresh it in the background so edited assets land on the next launch even
+  // when CACHE_NAME isn't bumped (cache-first used to freeze old code forever).
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      if (cached) return cached;
-      return fetch(event.request).then((response) => {
-        if (response.ok && response.type === "basic") {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-        }
-        return response;
-      });
-    }).catch(() => {
-      if (event.request.destination === "document") {
-        return caches.match("/mobile/index.html");
-      }
-    })
+    caches.open(CACHE_NAME).then((cache) =>
+      cache.match(req).then((cached) => {
+        const fresh = fetch(req)
+          .then((response) => {
+            if (response && response.ok && response.type === "basic") cache.put(req, response.clone());
+            return response;
+          })
+          .catch(() => cached || (req.destination === "document" ? cache.match("/mobile/index.html") : undefined));
+        return cached || fresh;
+      })
+    )
   );
 });
 

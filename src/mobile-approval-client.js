@@ -16,6 +16,8 @@ function isRecognizedDecision(d) {
     const action = d.action || d.decision;
     if (action === "allow" || action === "deny") return true;
     if (d.action === "suggestion" && Number.isInteger(Number(d.index))) return true;
+    if (d.action === "elicitation-submit" && Array.isArray(d.selections)) return true;
+    if (d.action === "plan-feedback" && typeof d.feedback === "string") return true;
   }
   return false;
 }
@@ -24,6 +26,8 @@ function outcomeLabel(decision) {
   if (decision === "allow" || (decision && (decision.action === "allow" || decision.decision === "allow"))) return "Allowed";
   if (decision === "deny" || (decision && (decision.action === "deny" || decision.decision === "deny"))) return "Denied";
   if (decision && decision.action === "suggestion") return "Updated";
+  if (decision && decision.action === "elicitation-submit") return "Answered";
+  if (decision && decision.action === "plan-feedback") return "Sent feedback";
   return "Handled elsewhere";
 }
 
@@ -52,6 +56,12 @@ class MobileApprovalClient {
     const hasClients = typeof t.hasClients === "function" && t.hasClients();
     const hasPush = typeof t.hasPushSub === "function" && t.hasPushSub();
     return !!(hasClients || hasPush);
+  }
+
+  // The PWA renders questions / plan review / free-text, so it can answer every
+  // rich interaction kind. (Telegram returns false and is filtered out for them.)
+  supportsRichInteractions() {
+    return true;
   }
 
   requestApproval(payload, options = {}) {
@@ -87,9 +97,13 @@ class MobileApprovalClient {
 
       try {
         transport.pushApproval(handle, {
+          kind: payload.kind || "approval",
           title: payload.title,
           detail: payload.detail || "",
           suggestions: Array.isArray(payload.suggestions) ? payload.suggestions : undefined,
+          header: payload.header,
+          questions: Array.isArray(payload.questions) ? payload.questions : undefined,
+          plan: payload.plan,
         }, options.sessionId);
       } catch {
         finish(null);

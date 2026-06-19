@@ -1099,6 +1099,86 @@ describe("Mobile Preview v2 — approvals + pairing", () => {
     await new Promise((r) => setTimeout(r, 100));
   });
 
+  it("broadcasts a question approval with kind + questions on the wire", async () => {
+    await freshServer();
+    const transport = server.getApprovalTransport();
+    const { client } = await pairDevice(server, port, token, "device-q-01");
+    transport.pushApproval("h-q", {
+      kind: "question",
+      title: "claude-code asks a question",
+      detail: "Pick a color",
+      header: "Color",
+      questions: [{ question: "Pick a color", options: [{ label: "Red" }], multiSelect: false, allowOther: true }],
+    }, "s-q");
+    const msg = await client.waitFor("approval_request");
+    assert.strictEqual(msg.kind, "question");
+    assert.strictEqual(msg.handle, "h-q");
+    assert.strictEqual(msg.header, "Color");
+    assert.strictEqual(msg.questions.length, 1);
+    assert.strictEqual(msg.questions[0].multiSelect, false);
+    client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("carries rich kind fields in the reconnect approval_snapshot", async () => {
+    await freshServer();
+    const transport = server.getApprovalTransport();
+    const { client: c1, deviceId, secret } = await pairDevice(server, port, token, "device-snap-01");
+    c1.close();
+    await new Promise((r) => setTimeout(r, 100));
+    transport.pushApproval("h-plan", { kind: "plan", title: "claude-code shared a plan", detail: "Step 1", plan: "Step 1\nStep 2" }, "s-p");
+
+    const client = connectWithCredential(port, { deviceId, secret });
+    await waitForOpen(client.ws);
+    await client.waitFor("snapshot");
+    client.send({ type: "client_hello", protocol: "v2" });
+    const snap = await client.waitFor("approval_snapshot");
+    assert.strictEqual(snap.approvals.length, 1);
+    assert.strictEqual(snap.approvals[0].kind, "plan");
+    assert.strictEqual(snap.approvals[0].plan, "Step 1\nStep 2");
+    client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("DROPS a rich elicitation-submit decision from a token-only connection", async () => {
+    await freshServer();
+    const transport = server.getApprovalTransport();
+    let fired = null;
+    transport.onDecision((handle, decision) => { fired = { handle, decision }; });
+    transport.pushApproval("h-rich", { kind: "question", title: "q", detail: "d", questions: [] }, "s-r");
+
+    const client = connectWithCredential(port, { token });
+    await waitForOpen(client.ws);
+    await client.waitFor("snapshot");
+    client.send({ type: "client_hello", protocol: "v2" });
+    client.send({ type: "approval_decision", handle: "h-rich", decision: { action: "elicitation-submit", selections: [] } });
+    await new Promise((r) => setTimeout(r, 300));
+
+    assert.strictEqual(fired, null, "unpaired connection must not drive rich decisions");
+    client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("a paired+allowed device CAN drive a rich elicitation-submit decision", async () => {
+    await freshServer();
+    const transport = server.getApprovalTransport();
+    const decisions = [];
+    transport.onDecision((handle, decision) => { decisions.push({ handle, decision }); });
+    transport.pushApproval("h-rich2", { kind: "question", title: "q", detail: "d", questions: [] }, "s-r2");
+
+    const { client } = await pairDevice(server, port, token, "device-rich-01");
+    const dec = { action: "elicitation-submit", selections: [{ questionIndex: 0, optionIndices: [1] }] };
+    client.send({ type: "approval_decision", handle: "h-rich2", decision: dec });
+
+    const start = Date.now();
+    while (decisions.length === 0 && Date.now() - start < 2000) { await new Promise((r) => setTimeout(r, 25)); }
+
+    assert.strictEqual(decisions.length, 1);
+    assert.deepStrictEqual(decisions[0].decision, dec);
+    client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
   it("request_detail returns canFocus/model/contextUsage/lastOutput when present", async () => {
     await freshServer({ focusSession: () => {} });
     sessions.set("s-detail", {

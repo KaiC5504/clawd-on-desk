@@ -51,6 +51,113 @@
     return (typeof ICONS !== "undefined" && ICONS[name]) || "";
   }
 
+  // Minimal, escape-first Markdown → HTML for agent-authored plan text (ExitPlanMode).
+  // Every line is HTML-escaped before any formatting, so raw markup in a plan can never
+  // execute; covers the subset plans actually use: headings, lists, tables, code,
+  // emphasis, blockquotes, rules, links. Block-level walk; inline pass per text run.
+  function mdToHtml(src) {
+    var lines = String(src == null ? "" : src).replace(/\r\n?/g, "\n").split("\n");
+    var out = [], i = 0;
+
+    function cells(row) {
+      return row.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(function(c) { return c.trim(); });
+    }
+    function isTableSep(row) {
+      if (!row || row.indexOf("-") === -1) return false;
+      var cs = cells(row);
+      return cs.length > 0 && cs.every(function(c) { return /^:?-+:?$/.test(c); });
+    }
+
+    while (i < lines.length) {
+      var line = lines[i];
+
+      if (/^\s*```/.test(line)) {
+        var code = []; i++;
+        while (i < lines.length && !/^\s*```/.test(lines[i])) { code.push(esc(lines[i])); i++; }
+        i++; // closing fence
+        out.push('<pre class="approval-md-pre"><code>' + code.join("\n") + '</code></pre>');
+        continue;
+      }
+
+      if (/^\s*$/.test(line)) { i++; continue; }
+
+      var h = line.match(/^\s*(#{1,6})\s+(.*)$/);
+      if (h) {
+        var lv = h[1].length;
+        out.push('<h' + lv + ' class="approval-md-h approval-md-h' + lv + '">' + mdInline(esc(h[2].replace(/\s+#*\s*$/, ""))) + '</h' + lv + '>');
+        i++; continue;
+      }
+
+      if (/^\s*(?:---+|\*\*\*+|___+)\s*$/.test(line)) { out.push('<hr class="approval-md-hr">'); i++; continue; }
+
+      if (line.indexOf("|") !== -1 && i + 1 < lines.length && isTableSep(lines[i + 1])) {
+        var head = cells(line); i += 2;
+        var rows = [];
+        while (i < lines.length && lines[i].indexOf("|") !== -1 && !/^\s*$/.test(lines[i])) { rows.push(cells(lines[i])); i++; }
+        var thead = head.map(function(c) { return '<th>' + mdInline(esc(c)) + '</th>'; }).join("");
+        var tbody = rows.map(function(r) {
+          return '<tr>' + r.map(function(c) { return '<td>' + mdInline(esc(c)) + '</td>'; }).join("") + '</tr>';
+        }).join("");
+        out.push('<div class="approval-md-table-wrap"><table class="approval-md-table"><thead><tr>' + thead + '</tr></thead><tbody>' + tbody + '</tbody></table></div>');
+        continue;
+      }
+
+      if (/^\s*>/.test(line)) {
+        var bq = [];
+        while (i < lines.length && /^\s*>/.test(lines[i])) { bq.push(mdInline(esc(lines[i].replace(/^\s*>\s?/, "")))); i++; }
+        out.push('<blockquote class="approval-md-bq">' + bq.join("<br>") + '</blockquote>');
+        continue;
+      }
+
+      if (/^\s*[-*+]\s+/.test(line)) {
+        var ul = [];
+        while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) { ul.push('<li>' + mdInline(esc(lines[i].replace(/^\s*[-*+]\s+/, ""))) + '</li>'); i++; }
+        out.push('<ul class="approval-md-list">' + ul.join("") + '</ul>');
+        continue;
+      }
+
+      if (/^\s*\d+\.\s+/.test(line)) {
+        var ol = [];
+        while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) { ol.push('<li>' + mdInline(esc(lines[i].replace(/^\s*\d+\.\s+/, ""))) + '</li>'); i++; }
+        out.push('<ol class="approval-md-list">' + ol.join("") + '</ol>');
+        continue;
+      }
+
+      var para = [];
+      while (i < lines.length && !/^\s*$/.test(lines[i])
+        && !/^\s*(?:#{1,6}\s|>|[-*+]\s|\d+\.\s|```)/.test(lines[i])
+        && !/^\s*(?:---+|\*\*\*+|___+)\s*$/.test(lines[i])
+        && !(lines[i].indexOf("|") !== -1 && i + 1 < lines.length && isTableSep(lines[i + 1]))) {
+        para.push(mdInline(esc(lines[i].trim()))); i++;
+      }
+      out.push('<p class="approval-md-p">' + para.join("<br>") + '</p>');
+    }
+    return out.join("");
+  }
+
+  // Inline pass over an already-escaped string. Code spans are pulled out first so
+  // emphasis markers inside them stay literal.
+  function mdInline(s) {
+    var re = /`([^`]+)`/g, out = "", last = 0, m;
+    while ((m = re.exec(s)) !== null) {
+      out += mdEmphasis(s.slice(last, m.index)) + '<code class="approval-md-code">' + m[1] + '</code>';
+      last = re.lastIndex;
+    }
+    return out + mdEmphasis(s.slice(last));
+  }
+
+  function mdEmphasis(x) {
+    return x
+      .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, function(_, text, url) {
+        if (!/^(?:https?:|mailto:)/i.test(url)) return text;
+        var safe = url.replace(/"/g, "%22").replace(/'/g, "%27");
+        return '<a href="' + safe + '" target="_blank" rel="noopener">' + text + '</a>';
+      })
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/\*([^*\s][^*]*?)\*/g, "<em>$1</em>")
+      .replace(/~~([^~]+)~~/g, "<del>$1</del>");
+  }
+
   // The desktop is always reachable on the LAN (RFC1918 / loopback / link-local /
   // CGNAT-Tailscale / .local). A scanned QR may only re-point at such a host, so a
   // malicious "https://attacker.example/mobile/" QR can never steer the durable
@@ -918,93 +1025,393 @@
 
   // === ApprovalRenderer ===
 
+  // Approvals present as a full-screen modal (blurred backdrop) that collapses to
+  // a pill pinned at the top of the sessions page. One approval shows at a time;
+  // the rest queue. Drafts (typed answers / feedback) survive a collapse or a
+  // queue bump because re-renders restore them.
   class ApprovalRenderer {
-    constructor(container) {
-      this.container = container;
-      this.approvals = new Map(); // handle -> { handle, sessionId, title, detail, suggestions }
+    constructor(container, modalEl) {
+      this.container = container; // #approval-list → the pill
+      this.modalEl = modalEl;     // #approval-modal → the full-screen sheet
+      this.approvals = new Map(); // handle -> { handle, kind, title, detail, header, questions, plan, suggestions }
       this.resolving = new Set(); // handles awaiting approval_resolved
       this.outcomes = new Map();  // handle -> outcome text shown briefly before removal
+      this.drafts = new Map();    // handle -> in-progress form state
       this.paired = false;
       this.secure = false;        // server only accepts decisions over wss/loopback
       this.onDecision = null;     // (handle, decision) => void
+      this.expanded = false;
+      this.userCollapsed = false; // user pressed "Back to menu" — suppress auto-expand
+      this.activeHandle = null;
     }
 
-    setApproveContext(paired, secure) { this.paired = !!paired; this.secure = !!secure; this.render(); }
+    setApproveContext(paired, secure) {
+      this.paired = !!paired; this.secure = !!secure;
+      this.renderPill();
+      if (this.expanded) { this._scrapeActiveDraft(); this._renderModal(); }
+    }
+
+    // Full re-render (language change): pill + active modal, restoring the draft.
+    render() {
+      this.renderPill();
+      if (this.expanded) { this._scrapeActiveDraft(); this._renderModal(); }
+    }
 
     seed(list) {
-      this.approvals.clear();
-      (list || []).forEach((a) => { if (a && a.handle) this.approvals.set(a.handle, a); });
-      this.render();
+      this.approvals.clear(); this.drafts.clear(); this.resolving.clear(); this.outcomes.clear();
+      this.activeHandle = null;
+      var self = this;
+      (list || []).forEach(function(a) { if (a && a.handle) self.approvals.set(a.handle, a); });
+      this.renderPill();
+      if (this.expanded) {
+        if (this.approvals.size === 0) this._collapseEmpty();
+        else { this.activeHandle = this._pickActive(); this._renderModal(); }
+      }
     }
 
-    add(a) { if (a && a.handle) { this.approvals.set(a.handle, a); this.resolving.delete(a.handle); this.render(); } }
+    add(a) {
+      if (!a || !a.handle) return;
+      this.approvals.set(a.handle, a);
+      this.resolving.delete(a.handle);
+      this.renderPill();
+      if (this.expanded) {
+        // Keep the active form (and its draft) in place; only refresh the count.
+        if (!this.activeHandle || !this.approvals.has(this.activeHandle)) {
+          this.activeHandle = this._pickActive();
+          this._renderModal();
+        } else {
+          this._syncModalCount();
+        }
+      } else if (!this.userCollapsed) {
+        this.expand(); // idle → pop up
+      }
+      // collapsed by the user → pill count already bumped; stay collapsed
+    }
 
     resolve(handle, outcome) {
       if (!this.approvals.has(handle)) return;
       this.resolving.delete(handle);
+      var self = this;
       if (outcome) {
         this.outcomes.set(handle, outcome);
-        this.render();
-        var self = this;
-        setTimeout(function() { self.approvals.delete(handle); self.outcomes.delete(handle); self.render(); }, 1500);
+        if (this.expanded && handle === this.activeHandle) this._renderModal();
+        this.renderPill();
+        setTimeout(function() {
+          self.approvals.delete(handle); self.outcomes.delete(handle); self.drafts.delete(handle);
+          self._afterRemoval(handle);
+        }, 1500);
       } else {
-        this.approvals.delete(handle);
-        this.render();
+        this.approvals.delete(handle); this.outcomes.delete(handle); this.drafts.delete(handle);
+        this._afterRemoval(handle);
       }
     }
 
     submit(handle, decision) {
       this.resolving.add(handle);
-      this.render();
+      if (this.expanded && handle === this.activeHandle) {
+        var body = this.modalEl.querySelector(".approval-modal-body");
+        if (body) body.classList.add("resolving");
+      }
+      this.renderPill();
       if (this.onDecision) this.onDecision(handle, decision);
     }
 
-    render() {
-      var self = this;
-      if (this.approvals.size === 0) { this.container.innerHTML = ""; return; }
-      var html = '<div class="section-label">' + esc(t("approval_pending")) + ' &middot; ' + this.approvals.size + '</div>';
-      this.approvals.forEach(function(a) { html += self._renderCard(a); });
-      this.container.innerHTML = html;
-      this.container.querySelectorAll("[data-approve]").forEach(function(el) {
-        el.addEventListener("click", function() {
-          var handle = this.getAttribute("data-handle");
-          var kind = this.getAttribute("data-approve");
-          var decision;
-          if (kind === "allow") decision = "allow";
-          else if (kind === "deny") decision = "deny";
-          else decision = { action: "suggestion", index: parseInt(this.getAttribute("data-index"), 10) };
-          self.submit(handle, decision);
-        });
-      });
+    // Deep-link target (push tap): expand straight to a specific approval.
+    focusHandle(handle) {
+      if (!this.approvals.has(handle)) return;
+      this.activeHandle = handle;
+      this.userCollapsed = false;
+      this.expand();
     }
 
-    _renderCard(a) {
+    isOpen() { return this.expanded; }
+
+    expand() {
+      if (this.approvals.size === 0) return;
+      this.expanded = true;
+      this.userCollapsed = false;
+      if (!this.activeHandle || !this.approvals.has(this.activeHandle)) this.activeHandle = this._pickActive();
+      this.modalEl.classList.remove("hidden");
+      this._renderModal();
+      this.renderPill();
+    }
+
+    collapse(userInitiated) {
+      this._scrapeActiveDraft();
+      this.expanded = false;
+      this.userCollapsed = !!userInitiated;
+      this.modalEl.classList.add("hidden");
+      this.modalEl.innerHTML = "";
+      this.renderPill();
+    }
+
+    _collapseEmpty() {
+      this.expanded = false;
+      this.userCollapsed = false;
+      this.activeHandle = null;
+      this.modalEl.classList.add("hidden");
+      this.modalEl.innerHTML = "";
+      this.renderPill();
+    }
+
+    _afterRemoval(removedHandle) {
+      this.renderPill();
+      if (!this.expanded) return;
+      if (removedHandle === this.activeHandle || !this.approvals.has(this.activeHandle)) {
+        this.activeHandle = this._pickActive();
+        if (this.activeHandle) this._renderModal();
+        else this._collapseEmpty();
+      } else {
+        this._syncModalCount();
+      }
+    }
+
+    _pickActive() {
+      if (this.activeHandle && this.approvals.has(this.activeHandle) && !this.resolving.has(this.activeHandle)) return this.activeHandle;
+      var self = this, found = null;
+      this.approvals.forEach(function(a, h) { if (found === null && !self.resolving.has(h)) found = h; });
+      return found;
+    }
+
+    renderPill() {
+      if (this.approvals.size === 0) { this.container.innerHTML = ""; return; }
+      var html = '<div class="approval-pill" id="approval-pill">' + icon("shield")
+        + '<span class="approval-pill-label">' + esc(t("approval_pending")) + '</span>'
+        + '<span class="approval-pill-count">' + esc(t("approval_pill_pending", { n: this.approvals.size })) + '</span>'
+        + '</div>';
+      this.container.innerHTML = html;
+      var self = this;
+      var pill = document.getElementById("approval-pill");
+      if (pill) pill.addEventListener("click", function() { self.expand(); });
+    }
+
+    _syncModalCount() {
+      var el = this.modalEl.querySelector(".approval-modal-count");
+      if (el) el.textContent = t("approval_pill_pending", { n: this.approvals.size });
+    }
+
+    _renderModal() {
+      if (!this.expanded) return;
+      var a = this.activeHandle ? this.approvals.get(this.activeHandle) : null;
+      if (!a) { this._collapseEmpty(); return; }
+      var self = this;
+      var kind = a.kind || "approval";
+      var titleKey = kind === "question" ? "approval_kind_question" : (kind === "plan" ? "approval_kind_plan" : "approval_kind");
       var resolving = this.resolving.has(a.handle);
       var outcome = this.outcomes.get(a.handle);
-      var html = '<div class="approval-card' + (resolving || outcome ? ' resolving' : '') + '">';
-      html += '<div class="approval-head">' + icon("shield") + '<span class="approval-kind">' + esc(t("approval_kind")) + '</span></div>';
+      var interactive = this.paired && this.secure && !outcome && !resolving;
+
+      var inner = '<div class="approval-modal-title">' + esc(t(titleKey)) + '</div>';
+      if (outcome) inner += '<div class="approval-outcome">' + esc(outcome) + '</div>';
+      else if (!(this.paired && this.secure)) inner += this._renderReadOnly(a, kind);
+      else if (kind === "question") inner += this._renderQuestionBody(a);
+      else if (kind === "plan") inner += this._renderPlanBody(a);
+      else inner += this._renderApprovalBody(a);
+
+      var bodyClass = "approval-modal-body" + ((resolving || outcome) ? " resolving" : "");
+      var head = '<div class="approval-modal-head">'
+        + '<button class="detail-back" id="approval-back">' + icon("arrowLeft") + '<span>' + esc(t("approval_back_to_menu")) + '</span></button>'
+        + '<span class="approval-modal-count">' + esc(t("approval_pill_pending", { n: this.approvals.size })) + '</span>'
+        + '</div>';
+      this.modalEl.innerHTML = '<div class="approval-backdrop"></div><div class="approval-sheet">'
+        + head + '<div class="' + bodyClass + '">' + inner + '</div></div>';
+
+      var back = document.getElementById("approval-back");
+      if (back) back.addEventListener("click", function() { self.collapse(true); });
+      if (interactive) {
+        if (kind === "question") this._bindQuestion(a);
+        else if (kind === "plan") this._bindPlan(a);
+        else this._bindApproval(a);
+        this._restoreDraft(a, kind);
+      }
+    }
+
+    _renderApprovalBody(a) {
+      var html = "";
       if (a.title) html += '<div class="approval-title">' + esc(a.title) + '</div>';
       if (a.detail) html += '<div class="approval-detail">' + esc(a.detail) + '</div>';
-      if (outcome) { html += '<div class="approval-outcome">' + esc(outcome) + '</div></div>'; return html; }
-      if (!(this.paired && this.secure)) {
-        var hintKey = this.paired ? "approval_secure_hint" : "approval_pair_hint";
-        html += '<div class="approval-pair-hint">' + esc(t(hintKey)) + '</div></div>';
-        return html;
-      }
-      html += '<div class="approval-actions">';
-      html += '<button class="approval-btn allow" data-approve="allow" data-handle="' + esc(a.handle) + '">' + esc(t("approval_allow")) + '</button>';
-      html += '<button class="approval-btn deny" data-approve="deny" data-handle="' + esc(a.handle) + '">' + esc(t("approval_deny")) + '</button>';
-      html += '</div>';
+      html += '<div class="approval-modal-actions">'
+        + '<button class="approval-btn allow" data-act="allow">' + esc(t("approval_allow")) + '</button>'
+        + '<button class="approval-btn deny" data-act="deny">' + esc(t("approval_deny")) + '</button></div>';
       if (Array.isArray(a.suggestions) && a.suggestions.length) {
         html += '<div class="approval-suggestions">';
         for (var i = 0; i < a.suggestions.length; i++) {
           var sug = a.suggestions[i];
-          html += '<button class="approval-chip" data-approve="suggestion" data-index="' + sug.index + '" data-handle="' + esc(a.handle) + '">' + esc(sug.label) + '</button>';
+          html += '<button class="approval-chip" data-act="suggestion" data-index="' + sug.index + '">' + esc(sug.label) + '</button>';
         }
         html += '</div>';
       }
-      html += '</div>';
       return html;
+    }
+
+    _bindApproval(a) {
+      var self = this, handle = a.handle;
+      this.modalEl.querySelectorAll("[data-act]").forEach(function(el) {
+        el.addEventListener("click", function() {
+          var act = this.getAttribute("data-act"), d;
+          if (act === "allow") d = "allow";
+          else if (act === "deny") d = "deny";
+          else d = { action: "suggestion", index: parseInt(this.getAttribute("data-index"), 10) };
+          self.submit(handle, d);
+        });
+      });
+    }
+
+    _renderQuestionBody(a) {
+      var qs = Array.isArray(a.questions) ? a.questions : [];
+      var html = "";
+      for (var qi = 0; qi < qs.length; qi++) {
+        var q = qs[qi];
+        var type = q.multiSelect ? "checkbox" : "radio";
+        var name = "aq-" + qi;
+        html += '<div class="approval-q-block" data-q="' + qi + '">';
+        if (q.header) html += '<div class="approval-q-header">' + esc(q.header) + '</div>';
+        html += '<div class="approval-q-prompt">' + esc(q.question) + '</div>';
+        var opts = Array.isArray(q.options) ? q.options : [];
+        for (var oi = 0; oi < opts.length; oi++) {
+          var o = opts[oi];
+          html += '<label class="approval-option"><input type="' + type + '" name="' + name + '" data-opt="' + oi + '">'
+            + '<span class="approval-option-text"><span class="approval-option-label">' + esc(o.label) + '</span>'
+            + (o.description ? '<span class="approval-option-desc">' + esc(o.description) + '</span>' : "")
+            + '</span></label>';
+        }
+        if (q.allowOther !== false) {
+          html += '<label class="approval-option"><input type="' + type + '" name="' + name + '" data-other="1">'
+            + '<span class="approval-option-text"><span class="approval-option-label">' + esc(t("approval_other")) + '</span></span></label>'
+            + '<textarea class="approval-textarea hidden" data-other-text="' + qi + '" placeholder="' + esc(t("approval_other_placeholder")) + '"></textarea>';
+        }
+        html += '</div>';
+      }
+      html += '<button class="detail-focus-btn" id="approval-submit">' + esc(t("approval_submit")) + '</button>';
+      return html;
+    }
+
+    _bindQuestion(a) {
+      var self = this, handle = a.handle;
+      this.modalEl.querySelectorAll(".approval-q-block").forEach(function(block) {
+        var other = block.querySelector("[data-other]");
+        var ta = block.querySelector("[data-other-text]");
+        function syncOther() { if (ta) { if (other && other.checked) ta.classList.remove("hidden"); else ta.classList.add("hidden"); } }
+        block.querySelectorAll("input[type=radio],input[type=checkbox]").forEach(function(inp) { inp.addEventListener("change", syncOther); });
+        if (ta) ta.addEventListener("focus", function() { self._scrollIntoView(ta); });
+      });
+      var submit = document.getElementById("approval-submit");
+      if (submit) submit.addEventListener("click", function() { self._submitQuestion(handle); });
+    }
+
+    _submitQuestion(handle) {
+      var a = this.approvals.get(handle); if (!a) return;
+      var selections = [];
+      this.modalEl.querySelectorAll(".approval-q-block").forEach(function(block) {
+        var qi = parseInt(block.getAttribute("data-q"), 10);
+        var optionIndices = [];
+        block.querySelectorAll("input[data-opt]").forEach(function(inp) { if (inp.checked) optionIndices.push(parseInt(inp.getAttribute("data-opt"), 10)); });
+        var otherInp = block.querySelector("[data-other]");
+        var otherTa = block.querySelector("[data-other-text]");
+        var otherText = (otherInp && otherInp.checked && otherTa) ? otherTa.value : "";
+        selections.push({ questionIndex: qi, optionIndices: optionIndices, otherText: otherText });
+      });
+      this.submit(handle, { action: "elicitation-submit", selections: selections });
+    }
+
+    _renderPlanBody(a) {
+      var html = "";
+      if (a.title) html += '<div class="approval-title">' + esc(a.title) + '</div>';
+      html += '<div class="detail-block"><div class="approval-plan approval-md">' + mdToHtml(a.plan || a.detail || "") + '</div></div>';
+      html += '<div class="approval-modal-actions">'
+        + '<button class="approval-btn allow" data-act="allow">' + esc(t("approval_approve")) + '</button>'
+        + '<button class="approval-btn deny" data-act="reject">' + esc(t("approval_reject")) + '</button></div>';
+      html += '<button class="settings-action-btn off approval-suggest-btn" id="approval-suggest">' + esc(t("approval_suggest_changes")) + '</button>';
+      html += '<textarea class="approval-textarea hidden" id="approval-feedback" placeholder="' + esc(t("approval_feedback_placeholder")) + '"></textarea>';
+      html += '<button class="detail-focus-btn hidden" id="approval-send-feedback">' + esc(t("approval_send_feedback")) + '</button>';
+      return html;
+    }
+
+    _bindPlan(a) {
+      var self = this, handle = a.handle;
+      this.modalEl.querySelectorAll("[data-act]").forEach(function(el) {
+        el.addEventListener("click", function() {
+          self.submit(handle, this.getAttribute("data-act") === "allow" ? "allow" : "deny");
+        });
+      });
+      var suggest = document.getElementById("approval-suggest");
+      var fb = document.getElementById("approval-feedback");
+      var send = document.getElementById("approval-send-feedback");
+      if (suggest && fb && send) {
+        suggest.addEventListener("click", function() {
+          fb.classList.remove("hidden"); send.classList.remove("hidden"); suggest.classList.add("hidden"); fb.focus();
+        });
+        fb.addEventListener("focus", function() { self._scrollIntoView(fb); });
+        send.addEventListener("click", function() {
+          var text = (fb.value || "").trim();
+          if (!text) { fb.focus(); return; } // empty would mean go-to-terminal on the desktop
+          self.submit(handle, { action: "plan-feedback", feedback: text });
+        });
+      }
+    }
+
+    _renderReadOnly(a, kind) {
+      var html = "";
+      if (a.title) html += '<div class="approval-title">' + esc(a.title) + '</div>';
+      if (kind === "question") {
+        var qs = Array.isArray(a.questions) ? a.questions : [];
+        for (var i = 0; i < qs.length; i++) html += '<div class="approval-q-prompt">' + esc(qs[i].question) + '</div>';
+      } else if (kind === "plan") {
+        html += '<div class="detail-block"><div class="approval-plan approval-md">' + mdToHtml(a.plan || "") + '</div></div>';
+      } else if (a.detail) {
+        html += '<div class="approval-detail">' + esc(a.detail) + '</div>';
+      }
+      html += '<div class="approval-pair-hint">' + esc(t(this.paired ? "approval_secure_hint" : "approval_pair_hint")) + '</div>';
+      return html;
+    }
+
+    _scrollIntoView(el) {
+      try { setTimeout(function() { el.scrollIntoView({ block: "center" }); }, 250); } catch (e) {}
+    }
+
+    _scrapeActiveDraft() {
+      if (!this.expanded || !this.activeHandle) return;
+      var a = this.approvals.get(this.activeHandle); if (!a) return;
+      if (!(this.paired && this.secure)) return;
+      var kind = a.kind || "approval";
+      var draft = {};
+      if (kind === "question") {
+        draft.q = {};
+        this.modalEl.querySelectorAll(".approval-q-block").forEach(function(block) {
+          var qi = block.getAttribute("data-q");
+          var optionIndices = [];
+          block.querySelectorAll("input[data-opt]").forEach(function(inp) { if (inp.checked) optionIndices.push(parseInt(inp.getAttribute("data-opt"), 10)); });
+          var otherInp = block.querySelector("[data-other]");
+          var otherTa = block.querySelector("[data-other-text]");
+          draft.q[qi] = { optionIndices: optionIndices, other: !!(otherInp && otherInp.checked), otherText: otherTa ? otherTa.value : "" };
+        });
+      } else if (kind === "plan") {
+        var fb = document.getElementById("approval-feedback");
+        draft.feedbackOpen = !!(fb && !fb.classList.contains("hidden"));
+        draft.feedback = fb ? fb.value : "";
+      }
+      this.drafts.set(this.activeHandle, draft);
+    }
+
+    _restoreDraft(a, kind) {
+      var draft = this.drafts.get(a.handle);
+      if (!draft) return;
+      if (kind === "question" && draft.q) {
+        this.modalEl.querySelectorAll(".approval-q-block").forEach(function(block) {
+          var d = draft.q[block.getAttribute("data-q")]; if (!d) return;
+          (d.optionIndices || []).forEach(function(oi) { var inp = block.querySelector('input[data-opt="' + oi + '"]'); if (inp) inp.checked = true; });
+          var otherInp = block.querySelector("[data-other]");
+          var otherTa = block.querySelector("[data-other-text]");
+          if (otherInp && d.other) { otherInp.checked = true; if (otherTa) otherTa.classList.remove("hidden"); }
+          if (otherTa && d.otherText) otherTa.value = d.otherText;
+        });
+      } else if (kind === "plan") {
+        var fb = document.getElementById("approval-feedback");
+        var send = document.getElementById("approval-send-feedback");
+        var suggest = document.getElementById("approval-suggest");
+        if (fb && draft.feedbackOpen) { fb.classList.remove("hidden"); if (send) send.classList.remove("hidden"); if (suggest) suggest.classList.add("hidden"); }
+        if (fb && draft.feedback) fb.value = draft.feedback;
+      }
     }
   }
 
@@ -1186,7 +1593,7 @@
       this.connection = new ConnectionManager();
       this.renderer = new SessionRenderer(document.getElementById("session-list"));
       this.settingsRenderer = new SettingsRenderer(document.getElementById("settings-content"));
-      this.approvals = new ApprovalRenderer(document.getElementById("approval-list"));
+      this.approvals = new ApprovalRenderer(document.getElementById("approval-list"), document.getElementById("approval-modal"));
       this.detail = new DetailRenderer(document.getElementById("detail-overlay"));
       this.push = new PushController(this.connection);
       this.notifier = new NotificationManager();
@@ -1308,8 +1715,7 @@
 
     _focusApproval(handle) {
       this._switchTab("sessions");
-      var el = document.querySelector('#approval-list [data-handle="' + handle + '"]');
-      if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+      this.approvals.focusHandle(handle);
     }
 
     _locationTarget() {
@@ -1471,7 +1877,7 @@
           if (self._pendingDeepLink) { var h = self._pendingDeepLink; self._pendingDeepLink = null; self._focusApproval(h); }
         }
         else if (msg.type === "approval_request") {
-          self.approvals.add({ handle: msg.handle, sessionId: msg.sessionId, title: msg.title, detail: msg.detail, suggestions: msg.suggestions });
+          self.approvals.add({ handle: msg.handle, sessionId: msg.sessionId, kind: msg.kind, title: msg.title, detail: msg.detail, header: msg.header, questions: msg.questions, plan: msg.plan, suggestions: msg.suggestions });
         }
         else if (msg.type === "approval_resolved") { self.approvals.resolve(msg.handle, msg.outcome); }
         else if (msg.type === "detail") { self.detail.update(msg.sessionId, msg.data); }

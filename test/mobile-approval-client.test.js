@@ -57,6 +57,16 @@ describe("isRecognizedDecision", () => {
     assert.strictEqual(isRecognizedDecision({ action: "suggestion", index: 2 }), true);
   });
 
+  it("accepts elicitation-submit with a selections array", () => {
+    assert.strictEqual(isRecognizedDecision({ action: "elicitation-submit", selections: [] }), true);
+    assert.strictEqual(isRecognizedDecision({ action: "elicitation-submit", selections: [{ questionIndex: 0, optionIndices: [1] }] }), true);
+  });
+
+  it("accepts plan-feedback with a string feedback (including empty)", () => {
+    assert.strictEqual(isRecognizedDecision({ action: "plan-feedback", feedback: "do x" }), true);
+    assert.strictEqual(isRecognizedDecision({ action: "plan-feedback", feedback: "" }), true);
+  });
+
   it("rejects junk", () => {
     assert.strictEqual(isRecognizedDecision(undefined), false);
     assert.strictEqual(isRecognizedDecision(null), false);
@@ -66,6 +76,17 @@ describe("isRecognizedDecision", () => {
     assert.strictEqual(isRecognizedDecision({ action: "suggestion" }), false);
     assert.strictEqual(isRecognizedDecision({ action: "suggestion", index: "x" }), false);
     assert.strictEqual(isRecognizedDecision({ action: "wat" }), false);
+    assert.strictEqual(isRecognizedDecision({ action: "elicitation-submit" }), false);
+    assert.strictEqual(isRecognizedDecision({ action: "elicitation-submit", selections: "x" }), false);
+    assert.strictEqual(isRecognizedDecision({ action: "plan-feedback" }), false);
+    assert.strictEqual(isRecognizedDecision({ action: "plan-feedback", feedback: 5 }), false);
+  });
+});
+
+describe("MobileApprovalClient.supportsRichInteractions", () => {
+  it("is true so the seam routes questions/plan/free-text to the phone", () => {
+    const client = new MobileApprovalClient({ getTransport: () => null });
+    assert.strictEqual(client.supportsRichInteractions(), true);
   });
 });
 
@@ -207,5 +228,44 @@ describe("MobileApprovalClient.requestApproval", () => {
     const t = makeFakeTransport({ clients: true, pushThrows: true });
     const client = new MobileApprovalClient({ getTransport: () => t, timeoutMs: 60000 });
     assert.strictEqual(await client.requestApproval(PAYLOAD), null);
+  });
+
+  it("forwards rich payload fields (kind/questions/header) to the transport", () => {
+    const t = makeFakeTransport({ clients: true });
+    const client = new MobileApprovalClient({ getTransport: () => t, timeoutMs: 60000 });
+    const qPayload = {
+      kind: "question",
+      title: "claude-code asks a question",
+      detail: "Pick a color",
+      header: "Color",
+      questions: [{ question: "Pick a color", options: [{ label: "Red" }], multiSelect: false, allowOther: true }],
+    };
+    client.requestApproval(qPayload);
+    assert.strictEqual(t.pushed.length, 1);
+    const fwd = t.pushed[0].payload;
+    assert.strictEqual(fwd.kind, "question");
+    assert.strictEqual(fwd.header, "Color");
+    assert.deepStrictEqual(fwd.questions, qPayload.questions);
+    client.stop();
+  });
+
+  it("forwards a plan payload's plan text to the transport", () => {
+    const t = makeFakeTransport({ clients: true });
+    const client = new MobileApprovalClient({ getTransport: () => t, timeoutMs: 60000 });
+    client.requestApproval({ kind: "plan", title: "claude-code shared a plan", detail: "Step 1", plan: "Step 1\nStep 2" });
+    assert.strictEqual(t.pushed[0].payload.kind, "plan");
+    assert.strictEqual(t.pushed[0].payload.plan, "Step 1\nStep 2");
+    client.stop();
+  });
+
+  it("resolves with a rich decision and labels it on neutralize", async () => {
+    const t = makeFakeTransport({ clients: true });
+    const client = new MobileApprovalClient({ getTransport: () => t, timeoutMs: 60000 });
+    const promise = client.requestApproval(PAYLOAD);
+    const handle = t.lastHandle();
+    const dec = { action: "elicitation-submit", selections: [{ questionIndex: 0, optionIndices: [0] }] };
+    t.emitDecision(handle, dec);
+    assert.deepStrictEqual(await promise, dec);
+    assert.strictEqual(t.neutralized[0].label, "Answered");
   });
 });
