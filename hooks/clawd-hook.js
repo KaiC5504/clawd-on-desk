@@ -358,6 +358,7 @@ function buildStateBody(event, payload, resolve) {
   const body = { state: resolvedState, session_id: sessionId, event: resolvedEvent };
   body.agent_id = "claude-code";
   if (cwd) body.cwd = cwd;
+  if (payload.transcript_path) body.transcript_path = payload.transcript_path;
   const toolName = typeof payload.tool_name === "string" && payload.tool_name ? payload.tool_name : null;
   const toolUseId = normalizeToolUseId(payload.tool_use_id ?? payload.toolUseId ?? payload.toolUseID);
   const toolInputFingerprint = buildToolInputFingerprint(

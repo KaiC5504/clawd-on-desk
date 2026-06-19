@@ -1014,3 +1014,23 @@ describe("buildStateBody — Stop → ApiError upgrade", () => {
     assert.strictEqual(body.state, "attention");
   });
 });
+
+describe("buildStateBody — transcript_path forwarding", () => {
+  it("includes transcript_path in the body when payload provides it", () => {
+    const body = buildStateBody(
+      "SessionStart",
+      { session_id: "s1", transcript_path: "/home/user/.claude/projects/foo/abc.jsonl" },
+      mockResolve
+    );
+    assert.strictEqual(body.transcript_path, "/home/user/.claude/projects/foo/abc.jsonl");
+  });
+
+  it("omits transcript_path from the body when payload does not include it", () => {
+    const body = buildStateBody(
+      "SessionStart",
+      { session_id: "s1" },
+      mockResolve
+    );
+    assert.ok(!("transcript_path" in body));
+  });
+});

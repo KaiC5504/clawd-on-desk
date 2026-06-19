@@ -7,6 +7,7 @@ const {
   deriveSessionBadge,
   isSessionInProgress,
   buildSessionSnapshot,
+  buildSessionSnapshotEntry,
   getActiveSessionAliasKeys,
   sessionSnapshotSignature,
 } = require("../src/state-session-snapshot");
@@ -491,5 +492,37 @@ describe("state-session-snapshot builder", () => {
     const base = buildSessionSnapshot(baseSessions, { statePriority: STATE_PRIORITY, getAgentIconUrl: () => null });
     const flagged = buildSessionSnapshot(flaggedSessions, { statePriority: STATE_PRIORITY, getAgentIconUrl: () => null });
     assert.notStrictEqual(sessionSnapshotSignature(base), sessionSnapshotSignature(flagged));
+  });
+});
+
+// ── Task 3: hasTranscript wire boolean ──
+describe("state-session-snapshot hasTranscript", () => {
+  it("entry has hasTranscript=true when session has a transcriptPath", () => {
+    const entry = buildSessionSnapshotEntry("s1", session("working", {
+      transcriptPath: "/home/user/.claude/projects/enc/abc.jsonl",
+    }));
+    assert.strictEqual(entry.hasTranscript, true);
+  });
+
+  it("entry has hasTranscript=false when session has no transcriptPath", () => {
+    const entry = buildSessionSnapshotEntry("s1", session("working"));
+    assert.strictEqual(entry.hasTranscript, false);
+  });
+
+  it("entry does NOT include transcriptPath (raw path stays server-internal)", () => {
+    const entry = buildSessionSnapshotEntry("s1", session("working", {
+      transcriptPath: "/home/user/.claude/projects/enc/abc.jsonl",
+    }));
+    assert.ok(!Object.prototype.hasOwnProperty.call(entry, "transcriptPath"));
+  });
+
+  it("snapshot signature differs between a session with and without a transcriptPath", () => {
+    const withPath = buildSessionSnapshot(new Map([
+      ["s1", session("working", { transcriptPath: "/home/user/.claude/projects/enc/abc.jsonl" })],
+    ]), { statePriority: STATE_PRIORITY, getAgentIconUrl: () => null });
+    const withoutPath = buildSessionSnapshot(new Map([
+      ["s1", session("working")],
+    ]), { statePriority: STATE_PRIORITY, getAgentIconUrl: () => null });
+    assert.notStrictEqual(sessionSnapshotSignature(withPath), sessionSnapshotSignature(withoutPath));
   });
 });

@@ -163,6 +163,7 @@ function handleStatePost(req, res, options) {
       const contextUsage = normalizeContextUsage(data.context_usage);
       const assistantLastOutput = normalizeAssistantLastOutput(data.assistant_last_output);
       const assistantLastOutputTruncated = data.assistant_last_output_truncated === true;
+      const transcriptPath = typeof data.transcript_path === "string" ? data.transcript_path : undefined;
       const permissionSuspect = data.permission_suspect === true;
       const preserveState = data.preserve_state === true;
       const hookSource = typeof data.hook_source === "string" ? data.hook_source : null;
@@ -278,6 +279,7 @@ function handleStatePost(req, res, options) {
             contextUsage,
             assistantLastOutput,
             assistantLastOutputTruncated,
+            transcriptPath,
             permissionSuspect,
             preserveState,
             hookSource,
