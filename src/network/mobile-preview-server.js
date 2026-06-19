@@ -996,6 +996,10 @@ function initMobilePreviewServer(ctx) {
       state: session.state || "idle",
       updatedAt: session.updatedAt || null,
       recentEvents,
+      // Lets the phone branch chat-view vs detail without subscribing to every
+      // session. Only CC sessions carry a transcriptPath; the raw path stays
+      // server-internal — only the boolean crosses the wire.
+      hasTranscript: !!(session && session.transcriptPath),
     };
   }
 

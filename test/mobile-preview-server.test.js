@@ -2266,4 +2266,24 @@ describe("Mobile Preview — Stage B live transcript subscription", () => {
     assert.strictEqual(code, 1008, "ungated/no-sub request_older still trips the 60/min close");
     await new Promise((r) => setTimeout(r, 100));
   });
+
+  it("session-list payload carries hasTranscript (boolean only, never the raw path)", async () => {
+    await freshServer();
+    // One CC session with a transcript, one plain session without.
+    makeTranscript("s-has", [assistantTextLine("x", "a0")]);
+    sessions.set("s-none", { state: "idle", agentId: "telegram", cwd: "/p", sessionTitle: "T", updatedAt: Date.now(), recentEvents: [] });
+    server.onSnapshot(); // prime the cache so the connect-time snapshot carries both
+
+    const mon = connectWithCredential(port, { token });
+    await waitForOpen(mon.ws);
+    const snap = await mon.waitFor("snapshot");
+
+    const withT = snap.sessions["s-has"];
+    const withoutT = snap.sessions["s-none"];
+    assert.strictEqual(withT.hasTranscript, true, "a CC session with a transcriptPath reports hasTranscript:true");
+    assert.ok(!("transcriptPath" in withT), "the raw transcriptPath never crosses the wire");
+    assert.strictEqual(withoutT.hasTranscript, false, "a session without a transcriptPath reports hasTranscript:false");
+    mon.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
 });
