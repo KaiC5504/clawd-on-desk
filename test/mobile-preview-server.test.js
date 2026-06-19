@@ -2229,4 +2229,41 @@ describe("Mobile Preview — Stage B live transcript subscription", () => {
     client.close();
     await new Promise((r) => setTimeout(r, 100));
   });
+
+  it("regenerateToken tears down active transcript subs (no leaked reader or debounce timer)", async () => {
+    await freshServer();
+    const file = makeTranscript("s-regen", [assistantTextLine("x", "a0")]);
+    const { client } = await connectTranscriptDevice("dev-regen");
+    client.send({ type: "subscribe_transcript", sessionId: "s-regen" });
+    await client.waitFor("transcript_snapshot");
+    assert.strictEqual(server._transcriptDebug().refCount("s-regen"), 1);
+
+    // Arm a debounce timer, then regenerate the token (kicks all clients). ws.close
+    // is async, so the synchronous clientMeta.clear() must NOT be what releases the
+    // reader — regenerateToken has to tear the subs down itself.
+    appendTranscript(file, assistantTextLine("y", "a1"));
+    server.onSnapshot();
+    assert.strictEqual(server._transcriptDebug().pendingTimers(), 1, "a debounce timer is armed before regen");
+
+    server.regenerateToken();
+    assert.strictEqual(server._transcriptDebug().readerCount(), 0, "all shared readers dropped on regen");
+    assert.strictEqual(server._transcriptDebug().pendingTimers(), 0, "no debounce timer survives regen");
+    client.close();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("an ungated client's request_older_transcript flood STILL counts toward the 60/min close", async () => {
+    await freshServer();
+    makeTranscript("s-ungated", [assistantTextLine("x", "a0")]);
+    // A token-only monitor: never paired, no transcriptAllowed, no active sub. Its
+    // request_older_transcript is not warranted, so the exemption must NOT apply.
+    const mon = connectWithCredential(port, { token });
+    await waitForOpen(mon.ws);
+    await mon.waitFor("snapshot");
+    const closed = waitForClose(mon.ws);
+    for (let i = 0; i < 70; i++) mon.send({ type: "request_older_transcript", sessionId: "s-ungated", beforeCursor: "", count: 50 });
+    const code = await closed;
+    assert.strictEqual(code, 1008, "ungated/no-sub request_older still trips the 60/min close");
+    await new Promise((r) => setTimeout(r, 100));
+  });
 });

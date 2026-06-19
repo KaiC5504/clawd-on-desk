@@ -300,12 +300,25 @@ function initMobilePreviewServer(ctx) {
     if (!persistTokenState(nextState)) {
       throw new Error("Failed to persist mobile token state");
     }
-    // Kick all connected clients (they have stale tokens)
+    // Kick all connected clients (they have stale tokens). ws.close fires its
+    // "close" event asynchronously, but we clear clientMeta synchronously below —
+    // so the close handler would find no meta and skip closeTranscriptSub, leaking
+    // every reader + its 250ms debounce. Tear the subs down here first.
+    for (const [c, meta] of clientMeta) {
+      if (meta && meta.transcriptSub) closeTranscriptSub(c, meta.transcriptSub);
+    }
     for (const c of clients) {
       try { c.close(1008, "Token regenerated"); } catch {}
     }
     clients.clear();
     clientMeta.clear();
+    // Defensive sweep: any orphaned shared entry (e.g. a sub whose meta was already
+    // gone) still holds a live reader + timer — release them like cleanup() does.
+    for (const entry of transcriptSubs.values()) {
+      if (entry.debounceTimer) { clearTimeout(entry.debounceTimer); entry.debounceTimer = null; }
+      try { entry.reader.close(); } catch {}
+    }
+    transcriptSubs.clear();
     scheduleRotation(); // reset the 24h timer
     return newToken;
   }
@@ -552,11 +565,15 @@ function initMobilePreviewServer(ctx) {
       try { msg = JSON.parse(data); } catch { return; }
       if (!msg || typeof msg.type !== "string") return;
 
-      // Parse the type FIRST so transcript scrollback can be exempted from the
+      // Parse the type FIRST so legitimate transcript scrollback can skip the
       // 60/min socket-closing limit: a phone fast-paging history would otherwise
-      // trip it and get disconnected. The limit stays fully intact for every
-      // other type (the counter is only skipped for this one).
-      if (msg.type !== "request_older_transcript") {
+      // trip it and get disconnected. Exempt ONLY when the request is actually
+      // warranted — an allowed+secure device with an active subscription. An
+      // ungated/no-sub request_older_transcript (e.g. a token-only monitor that
+      // never paired) still counts, so it can't flood the channel for free.
+      const exempt = msg.type === "request_older_transcript"
+        && canViewTranscript(meta) && !!meta.transcriptSub;
+      if (!exempt) {
         const nowMs = Date.now();
         if (nowMs - meta.windowStart > RATE_WINDOW_MS) { meta.messageCount = 0; meta.windowStart = nowMs; }
         if (++meta.messageCount > RATE_MAX) { ws.close(1008, "Rate limit"); return; }
@@ -656,7 +673,7 @@ function initMobilePreviewServer(ctx) {
 
       case "request_older_transcript": {
         const sid = String(msg.sessionId || "");
-        if (!canViewTranscript(meta)) { send(ws, "transcript_unavailable", { sessionId: sid, reason: transcriptUnavailableReason(meta, sid) }); return; }
+        if (!canViewTranscript(meta)) { send(ws, "transcript_unavailable", { sessionId: sid, reason: transcriptUnavailableReason(meta) }); return; }
         const entry = transcriptSubs.get(sid);
         // Only a current subscriber may page (the shared reader owns the offset).
         if (!entry || meta.transcriptSub !== sid) return;
@@ -736,7 +753,7 @@ function initMobilePreviewServer(ctx) {
   // the phone shows the actionable cause (enable transcripts / grant the device /
   // use HTTPS). When the gate itself passes, the only remaining cause is a missing
   // transcriptPath.
-  function transcriptUnavailableReason(meta, sessionId) {
+  function transcriptUnavailableReason(meta) {
     if (!transcriptEnabled()) return "disabled";
     if (!meta.deviceId || !meta.transcriptAllowed) return "not-allowed";
     if (!meta.secure && !isLoopbackIp(meta.ip)) return "insecure";
@@ -797,7 +814,7 @@ function initMobilePreviewServer(ctx) {
 
   function handleSubscribeTranscript(ws, meta, sessionId) {
     if (!canViewTranscript(meta)) {
-      send(ws, "transcript_unavailable", { sessionId, reason: transcriptUnavailableReason(meta, sessionId) });
+      send(ws, "transcript_unavailable", { sessionId, reason: transcriptUnavailableReason(meta) });
       return;
     }
     const session = ctx.sessions && ctx.sessions.get(sessionId);
