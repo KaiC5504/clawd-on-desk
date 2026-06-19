@@ -498,6 +498,24 @@
     allowWrap.appendChild(allowText);
     controls.appendChild(allowWrap);
 
+    // Transcript default is OFF (unlike approvals which defaults on), so must be === true
+    const transcriptWrap = document.createElement("label");
+    transcriptWrap.className = "mobile-device-allow";
+    const tcb = document.createElement("input");
+    tcb.type = "checkbox";
+    tcb.checked = device.transcriptAllowed === true;
+    tcb.addEventListener("change", () => {
+      if (window.settingsAPI && typeof window.settingsAPI.setMobileDeviceTranscript === "function") {
+        window.settingsAPI.setMobileDeviceTranscript(device.deviceId, tcb.checked)
+          .then(() => renderDevices()).catch(() => {});
+      }
+    });
+    transcriptWrap.appendChild(tcb);
+    const tText = document.createElement("span");
+    tText.textContent = t("mobileDeviceAllowTranscript");
+    transcriptWrap.appendChild(tText);
+    controls.appendChild(transcriptWrap);
+
     const revokeBtn = document.createElement("button");
     revokeBtn.className = "mobile-action-btn mobile-action-danger";
     revokeBtn.textContent = t("mobileDeviceRevoke");
@@ -553,6 +571,21 @@
       labelKey: "mobileApprovalsToggle",
       descKey: "mobileApprovalsToggleDesc",
     }));
+
+    // 1b. Transcript toggles
+    v2Container.appendChild(helpers.buildSwitchRow({
+      key: "mobileTranscriptEnabled",
+      labelKey: "mobileTranscriptToggle",
+      descKey: "mobileTranscriptToggleDesc",
+    }));
+    // Only meaningful when the transcript feature is enabled
+    if (snapshot().mobileTranscriptEnabled === true) {
+      v2Container.appendChild(helpers.buildSwitchRow({
+        key: "mobileTranscriptToolOutput",
+        labelKey: "mobileTranscriptOutputToggle",
+        descKey: "mobileTranscriptOutputToggleDesc",
+      }));
+    }
 
     // 2. Connection mode
     v2Container.appendChild(buildConnectionModeRow());
@@ -689,6 +722,10 @@
         const c = evt.changes;
         if (Object.prototype.hasOwnProperty.call(c, "mobilePreviewEnabled")) {
           if (infoContainer) renderConnectionInfo(infoContainer);
+          renderV2Sections();
+          return;
+        }
+        if (Object.prototype.hasOwnProperty.call(c, "mobileTranscriptEnabled")) {
           renderV2Sections();
           return;
         }
