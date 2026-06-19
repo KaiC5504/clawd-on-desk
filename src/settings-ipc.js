@@ -488,6 +488,10 @@ function registerSettingsIpc(options = {}) {
       const port = lanWsServer.getPort();
       const tok = lanWsServer.getToken();
       if (!Number.isInteger(port) || port <= 0 || typeof tok !== "string" || !tok) {
+        // A recorded bind failure (e.g. the configured port is occupied) is a hard
+        // error to surface in Settings, not an endless "starting…".
+        const bindErr = typeof lanWsServer.getHttpError === "function" ? lanWsServer.getHttpError() : null;
+        if (bindErr) return { status: "error", lastError: bindErr, message: bindErr };
         return { status: "starting", message: "LAN bridge is starting" };
       }
       const os = require("os");

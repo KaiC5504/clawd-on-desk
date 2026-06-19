@@ -2938,6 +2938,23 @@ function reconcileMobileServer() {
 _settingsController.subscribeKey("mobileHttpsEnabled", () => reconcileMobileServer());
 _settingsController.subscribeKey("mobileApprovalsEnabled", () => reconcileMobileServer());
 
+// A bound port can't be changed in place — the listener has to be torn down and
+// re-created on the new port. No-op when the mobile bridge is disabled.
+let _mobilePortRestartTimer = null;
+function restartMobileServer() {
+  if (_settingsController.get("mobilePreviewEnabled") !== true) return;
+  if (_mobilePortRestartTimer) clearTimeout(_mobilePortRestartTimer);
+  _mobilePortRestartTimer = setTimeout(async () => {
+    _mobilePortRestartTimer = null;
+    if (_settingsController.get("mobilePreviewEnabled") !== true) return;
+    if (_lanWss) { try { _lanWss.cleanup(); } catch {} _mobileApprovalClient.stop(); }
+    _lanWss = createLanWss();
+    try { await _lanWss.start(); } catch (e) { console.error("[mobile-preview] restart failed:", e && e.message); }
+  }, 300);
+}
+_settingsController.subscribeKey("mobilePort", () => restartMobileServer());
+_settingsController.subscribeKey("mobileHttpsPort", () => restartMobileServer());
+
 animationOverridesMain = createSettingsAnimationOverridesMain({
   app,
   BrowserWindow,

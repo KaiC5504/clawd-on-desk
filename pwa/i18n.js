@@ -55,6 +55,8 @@
     pair_paired:        { en: "Paired", zh: "已配对", "zh-TW": "已配對", ko: "페어링됨", ja: "ペアリング済み" },
     pair_unpaired:      { en: "Not paired", zh: "未配对", "zh-TW": "未配對", ko: "페어링 안 됨", ja: "未ペアリング" },
     pair_hint:          { en: "Once paired, the device stays connected across token rotation", zh: "配对后即使令牌轮换也无需重连", "zh-TW": "配對後即使權杖輪換也無需重新連線", ko: "페어링하면 토큰이 교체되어도 연결이 유지됩니다", ja: "ペアリングすればトークンが更新されても接続は維持されます" },
+    pair_disconnect:    { en: "Disconnect this desktop", zh: "断开此桌面端", "zh-TW": "中斷此桌面端", ko: "이 데스크톱 연결 해제", ja: "このデスクトップを切断" },
+    pair_disconnect_confirm: { en: "Tap again to disconnect", zh: "再次点击以断开", "zh-TW": "再次點擊以中斷", ko: "다시 탭하여 연결 해제", ja: "もう一度タップして切断" },
     pair_enter_title:   { en: "Pair this device", zh: "配对此设备", "zh-TW": "配對此裝置", ko: "이 기기 페어링", ja: "この端末をペアリング" },
     pair_enter_hint:    { en: "Enter the code shown on the desktop (Settings → Mobile).", zh: "输入桌面端「设置 → 移动端」中显示的配对码。", "zh-TW": "輸入桌面端「設定 → 行動裝置」中顯示的配對碼。", ko: "데스크톱(설정 → 모바일)에 표시된 코드를 입력하세요.", ja: "デスクトップ（設定 → モバイル）に表示されたコードを入力してください。" },
     code_connect:       { en: "Connect", zh: "连接", "zh-TW": "連線", ko: "연결", ja: "接続" },
@@ -62,6 +64,19 @@
     code_rejected:      { en: "Code rejected or expired — get a fresh one on the desktop.", zh: "配对码无效或已过期，请在桌面端获取新的配对码。", "zh-TW": "配對碼無效或已過期，請在桌面端取得新的配對碼。", ko: "코드가 거부되었거나 만료되었습니다 — 데스크톱에서 새 코드를 받으세요.", ja: "コードが拒否されたか期限切れです — デスクトップで新しいコードを取得してください。" },
     pair_cta_settings:  { en: "Not paired — pair in Settings", zh: "未配对 — 请前往设置配对", "zh-TW": "未配對 — 請前往設定配對", ko: "페어링 안 됨 — 설정에서 페어링하세요", ja: "未ペアリング — 設定でペアリングしてください" },
     pair_go_settings:   { en: "Go to Settings", zh: "前往设置", "zh-TW": "前往設定", ko: "설정으로 이동", ja: "設定へ移動" },
+
+    // ── QR re-point scanner ──
+    scan_reconnect:     { en: "Scan QR to reconnect", zh: "扫码重新连接", "zh-TW": "掃碼重新連線", ko: "QR 스캔하여 재연결", ja: "QRをスキャンして再接続" },
+    scan_title:         { en: "Scan pairing QR", zh: "扫描配对二维码", "zh-TW": "掃描配對 QR 碼", ko: "페어링 QR 스캔", ja: "ペアリングQRをスキャン" },
+    scan_cancel:        { en: "Cancel", zh: "取消", "zh-TW": "取消", ko: "취소", ja: "キャンセル" },
+    scan_hint:          { en: "Point at the QR on the desktop (Settings → Mobile)", zh: "对准桌面端（设置 → 移动端）显示的二维码", "zh-TW": "對準桌面端（設定 → 行動裝置）顯示的 QR 碼", ko: "데스크톱(설정 → 모바일)의 QR을 비추세요", ja: "デスクトップ（設定 → モバイル）のQRに向けてください" },
+    scan_photo_hint:    { en: "Pick a photo of the QR code", zh: "选择二维码的照片", "zh-TW": "選擇 QR 碼的照片", ko: "QR 코드 사진을 선택하세요", ja: "QRコードの写真を選択してください" },
+    scan_camera_denied: { en: "Camera unavailable — choose a photo of the QR instead", zh: "无法使用相机 — 请改为选择二维码照片", "zh-TW": "無法使用相機 — 請改為選擇 QR 碼照片", ko: "카메라를 사용할 수 없습니다 — QR 사진을 선택하세요", ja: "カメラを使用できません — QRの写真を選択してください" },
+    scan_invalid:       { en: "Couldn't read a QR code — try again", zh: "未能识别二维码，请重试", "zh-TW": "無法辨識 QR 碼，請重試", ko: "QR 코드를 읽지 못했습니다 — 다시 시도하세요", ja: "QRコードを読み取れませんでした — もう一度お試しください" },
+    scan_pick_photo:    { en: "Choose photo", zh: "选择照片", "zh-TW": "選擇照片", ko: "사진 선택", ja: "写真を選択" },
+    scan_unsupported:   { en: "That QR isn't a Clawd address", zh: "该二维码不是 Clawd 地址", "zh-TW": "該 QR 碼不是 Clawd 位址", ko: "이 QR은 Clawd 주소가 아닙니다", ja: "このQRはClawdのアドレスではありません" },
+    scan_not_lan:       { en: "That address isn't on your local network", zh: "该地址不在你的局域网内", "zh-TW": "該位址不在你的區域網路內", ko: "해당 주소는 로컬 네트워크에 없습니다", ja: "そのアドレスはローカルネットワーク上にありません" },
+    scan_repointed:     { en: "Reconnecting to {addr}…", zh: "正在重新连接到 {addr}…", "zh-TW": "正在重新連線到 {addr}…", ko: "{addr}에 재연결 중…", ja: "{addr} に再接続中…" },
 
     // ── Navigation ──
     nav_sessions:       { en: "Sessions", zh: "会话", "zh-TW": "工作階段", ko: "세션", ja: "セッション" },

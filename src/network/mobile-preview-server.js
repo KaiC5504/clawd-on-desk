@@ -24,9 +24,7 @@ const { SUPPORTED_LANGS } = require("../i18n");
 
 const PROTOCOL_VERSION = "v2";
 const DEFAULT_PORT = 23334;
-const PORT_RANGE = 5;
 const HTTPS_DEFAULT_PORT = 23339;
-const HTTPS_PORT_RANGE = 5;
 const HEARTBEAT_MS = 30000;
 const CLIENT_TIMEOUT_MS = 90000;
 const RATE_WINDOW_MS = 60000;
@@ -149,6 +147,7 @@ function initMobilePreviewServer(ctx) {
   let httpsWss = null;
   let activePort = null;
   let httpsPort = null;
+  let httpError = null;  // last HTTP-start failure (e.g. port bind), surfaced to Settings
   let httpsError = null; // last HTTPS-start failure, surfaced to the Settings UI
   let heartbeatTimer = null;
   let rotationTimer = null;
@@ -183,6 +182,15 @@ function initMobilePreviewServer(ctx) {
   function desktopLanguage() {
     const lang = settingsSnapshot().lang;
     return SUPPORTED_LANGS.includes(lang) ? lang : "en";
+  }
+  function isValidPort(v) { return Number.isInteger(v) && v >= 1024 && v <= 65535; }
+  function configuredPort() {
+    const p = settingsSnapshot().mobilePort;
+    return isValidPort(p) ? p : DEFAULT_PORT;
+  }
+  function configuredHttpsPort() {
+    const p = settingsSnapshot().mobileHttpsPort;
+    return isValidPort(p) ? p : HTTPS_DEFAULT_PORT;
   }
 
   // ── Token rotation ──
@@ -358,10 +366,11 @@ function initMobilePreviewServer(ctx) {
       const ready = Number.isInteger(activePort) && activePort > 0;
       const httpsReady = Number.isInteger(httpsPort) && httpsPort > 0;
       const info = {
-        status: ready ? "ok" : "starting",
+        status: ready ? "ok" : (httpError ? "error" : "starting"),
         port: ready ? activePort : null,
         httpsPort: httpsReady ? httpsPort : null,
         httpsReady,
+        lastError: httpError,
         lanIp: getLocalIP(),
         host: CLAWD_HOST,
         mode: connectionMode(),
@@ -632,7 +641,7 @@ function initMobilePreviewServer(ctx) {
   }
 
   // ws re-emits the underlying server's 'error' (e.g. EADDRINUSE) on the
-  // WebSocket.Server; swallow it here so the port-retry in listenWithRange (which
+  // WebSocket.Server; swallow it here so the port-retry in listenExactPort (which
   // listens on the http server's own 'error') can do its job without crashing.
   function ignoreWssError(err) {
     if (err && err.code !== "EADDRINUSE") console.error("[mobile-preview] wss error:", err.message);
@@ -856,29 +865,33 @@ function initMobilePreviewServer(ctx) {
 
   // ── Public API ──
 
-  function listenWithRange(server, basePort, range) {
+  // Bind the EXACT configured port. iOS A2HS freezes its launch port, so silently
+  // drifting to another port (the old range-walk) left paired phones dialing a dead
+  // port forever — that was the bug. On EADDRINUSE we only retry the SAME port a few
+  // times (covers our own dying instance's brief TIME_WAIT), then surface the error.
+  const PORT_RETRY_ATTEMPTS = 5;
+  const PORT_RETRY_DELAY_MS = 800;
+  function listenExactPort(server, port, attempt = 0) {
     return new Promise((resolve, reject) => {
-      const ports = [];
-      for (let i = 0; i < range; i++) ports.push(basePort + i);
-      let idx = 0;
       const onError = (err) => {
-        if (err.code === "EADDRINUSE" && idx < ports.length - 1) {
-          idx++;
-          server.listen(ports[idx], "0.0.0.0");
-          return;
-        }
         server.removeListener("error", onError);
         server.removeListener("listening", onListening);
+        if (err.code === "EADDRINUSE" && attempt < PORT_RETRY_ATTEMPTS - 1) {
+          setTimeout(() => {
+            listenExactPort(server, port, attempt + 1).then(resolve, reject);
+          }, PORT_RETRY_DELAY_MS);
+          return;
+        }
         reject(err);
       };
       const onListening = () => {
         server.removeListener("error", onError);
         server.removeListener("listening", onListening);
-        resolve(ports[idx]);
+        resolve(port);
       };
       server.on("error", onError);
       server.on("listening", onListening);
-      server.listen(ports[0], "0.0.0.0");
+      server.listen(port, "0.0.0.0");
     });
   }
 
@@ -896,14 +909,17 @@ function initMobilePreviewServer(ctx) {
     }
     createHttpsServer();
     if (!httpsServer) { httpsError = "Could not create the HTTPS server"; return; }
+    const wantPort = configuredHttpsPort();
     try {
-      httpsPort = await listenWithRange(httpsServer, HTTPS_DEFAULT_PORT, HTTPS_PORT_RANGE);
+      httpsPort = await listenExactPort(httpsServer, wantPort);
       console.log(`[mobile-preview] HTTPS on 0.0.0.0:${httpsPort}`);
       // clawd.local matters once we hand out https://clawd.local:<port> URLs.
       try { mdns.start(); } catch {}
     } catch (err) {
       console.error("[mobile-preview] HTTPS listen failed:", err.message);
-      httpsError = `HTTPS could not start: ${err.message}`;
+      httpsError = err.code === "EADDRINUSE"
+        ? `HTTPS port ${wantPort} is already in use. Pick a different HTTPS port.`
+        : `HTTPS could not start: ${err.message}`;
       try { httpsServer.close(); } catch {}
       httpsServer = null;
       if (httpsWss) { try { httpsWss.close(); } catch {} httpsWss = null; }
@@ -946,16 +962,35 @@ function initMobilePreviewServer(ctx) {
 
   async function start() {
     closed = false;
+    httpError = null;
 
     createHttpServer();
-    activePort = await listenWithRange(httpServer, DEFAULT_PORT, PORT_RANGE);
-    console.log(`[mobile-preview] started on 0.0.0.0:${activePort}`);
+    const wantPort = configuredPort();
+    try {
+      activePort = await listenExactPort(httpServer, wantPort);
+      console.log(`[mobile-preview] started on 0.0.0.0:${activePort}`);
+    } catch (err) {
+      // A bind failure must not take the whole app down — surface it to Settings.
+      // HTTPS is bound independently below, so an occupied HTTP port still leaves a
+      // secure-context (wss) phone working.
+      console.error("[mobile-preview] HTTP listen failed:", err.message);
+      httpError = err.code === "EADDRINUSE"
+        ? `Port ${wantPort} is already in use. Pick a different port.`
+        : `Mobile bridge could not start: ${err.message}`;
+      try { httpServer.close(); } catch {}
+      httpServer = null;
+      if (wss) { try { wss.close(); } catch {} wss = null; }
+      activePort = null;
+    }
 
     await ensurePushKeysIfNeeded();
     if (httpsEnabled()) await startHttps();
 
-    pollSessions(); // Prime cache from current state
-    scheduleRotation(); // Start the 24h rotation timer
+    // Skip polling/rotation only when neither listener came up.
+    if (activePort || httpsPort) {
+      pollSessions(); // Prime cache from current state
+      scheduleRotation(); // Start the 24h rotation timer
+    }
     return activePort;
   }
 
@@ -1009,6 +1044,7 @@ function initMobilePreviewServer(ctx) {
     reconcile,
     getPort: () => activePort,
     getHttpsPort: () => httpsPort,
+    getHttpError: () => httpError,
     getToken: () => tokenState.token,
     getPairingCode: () => currentPairingCode(now()),
     regeneratePairingCode: () => freshPairingCode(now()),

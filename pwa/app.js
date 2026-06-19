@@ -35,6 +35,10 @@
   // language picker, with a full re-render on change.
   function t(key, vars) { return CLAWD_I18N.t(key, vars); }
 
+  // Bridge for qr-scan.js — it loads as a separate <script>, outside this IIFE,
+  // so it reaches t()/showToast through these globals.
+  window.clawdT = function(key, vars) { return t(key, vars); };
+
   // === Utilities ===
 
   function esc(str) {
@@ -45,6 +49,27 @@
 
   function icon(name) {
     return (typeof ICONS !== "undefined" && ICONS[name]) || "";
+  }
+
+  // The desktop is always reachable on the LAN (RFC1918 / loopback / link-local /
+  // CGNAT-Tailscale / .local). A scanned QR may only re-point at such a host, so a
+  // malicious "https://attacker.example/mobile/" QR can never steer the durable
+  // credential to an internet-routable server — TLS won't save us there (the phone
+  // trusts any publicly-valid cert), but refusing public hosts outright does.
+  function isLanHost(host) {
+    if (!host) return false;
+    var h = String(host).toLowerCase();
+    if (h === "localhost" || h === "::1" || /\.local$/.test(h)) return true;
+    if (/^fe80:/.test(h) || /^f[cd][0-9a-f]{2}:/.test(h)) return true; // IPv6 link-local / ULA
+    var m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.\d{1,3}$/);
+    if (!m) return false;
+    var a = +m[1], b = +m[2];
+    if (a === 10 || a === 127) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT / Tailscale
+    return false;
   }
 
   // Pairing code is Crockford base32 (no I/L/O/U). Be forgiving on input: map the
@@ -124,6 +149,8 @@
     }
   }
 
+  window.clawdToast = function(message, type) { return showToast(message, type); };
+
   // === NotificationManager ===
 
   class NotificationManager {
@@ -176,8 +203,12 @@
       this.retryCount = 0;
       this.onStateChange = null; this.onMessage = null; this.onDisconnected = null;
       this.onOpen = null; this.onNeedsPairing = null; this.onCodeError = null;
+      this.onResolveTarget = null;
       this._hiddenAt = 0;
       this._hasConnectedOnce = false;
+      this._candidateIdx = 0;
+      this._connectSeq = 0;
+      this._endpointRecorded = false;
       this.deviceId = this._loadDeviceId();
       this.paired = this._loadPairing();
       this._triedDurable = false;
@@ -242,13 +273,50 @@
       this._needCode = false; // an explicit connect attempt lifts the code-entry suspension
       this.retryCount = 0;
       this.reconnectDelay = 1000;
+      this._candidateIdx = 0;
       clearTimeout(this.reconnectTimer);
       this._saveToHistory(config);
       this._doConnect();
     }
 
+    // Re-point the installed app at a scanned address. A paired device reconnects
+    // with its durable credential (the QR carries no token); an unpaired device
+    // rides any token the QR happens to include. Either way the page never
+    // navigates — only the WS target moves, so the frozen launch URL is irrelevant.
+    repoint(target) {
+      if (!target || !target.host || !target.port) return false;
+      this.connect({ host: target.host, port: target.port, secure: !!target.secure, token: target.token || null });
+      return true;
+    }
+
+    // Local forget: clear this phone's pairing and return to a clean disconnected
+    // state. The desktop list stays authoritative — the old secret is valid there
+    // until revoked. clawd-history is dropped too so _autoConnect won't re-target a
+    // dead port; clawd-device-id is kept so a re-pair reuses the stable id.
+    forget() {
+      clearTimeout(this.reconnectTimer);
+      var old = this.ws;
+      if (old) {
+        old.onopen = old.onmessage = old.onclose = old.onerror = null;
+        try { old.close(); } catch {}
+      }
+      this.ws = null;
+      this.paired = null;
+      this._needCode = true;
+      this.config = null;
+      try { localStorage.removeItem("clawd-pairing"); } catch {}
+      try { localStorage.removeItem("clawd-history"); } catch {}
+      try { localStorage.removeItem("clawd-endpoints"); } catch {}
+      this._setState("disconnected");
+      log("Disconnected from desktop");
+    }
+
     _doConnect() {
       if (!this.config) return;
+      // Each attempt gets a generation id so an async rotation that resolves late
+      // can tell it was superseded by a foreground reconnect or a user scan.
+      this._connectSeq++;
+      this._endpointRecorded = false;
       // Tear down old socket — clear callbacks first to prevent stale events
       var old = this.ws;
       if (old) {
@@ -284,9 +352,20 @@
       this.ws = socket;
       var self = this;
       var connected = false;
+      // Bound the attempt: an unreachable host (a stale IP after moving networks)
+      // would otherwise hang the socket for the OS TCP timeout (~30-75s), stalling
+      // reconnect/rotation. If OPEN doesn't arrive in time, drop it and retry.
+      var connectTimer = setTimeout(function() {
+        if (socket !== self.ws || connected) return;
+        log("Connect timed out");
+        socket.onopen = socket.onmessage = socket.onclose = socket.onerror = null;
+        try { socket.close(); } catch {}
+        self._scheduleReconnect();
+      }, 6000);
       socket.onopen = function() {
         if (socket !== self.ws) return; // stale socket — ignore
-        connected = true; self.retryCount = 0; self.reconnectDelay = 1000; self._forceToken = false;
+        clearTimeout(connectTimer);
+        connected = true; self.retryCount = 0; self.reconnectDelay = 1000; self._forceToken = false; self._candidateIdx = 0;
         self._setState("connected"); log("Connected");
         // Announce only on the genuine first pairing. An already-paired device is
         // "still connected" — a foreground reconnect or a cold relaunch just updates
@@ -312,10 +391,21 @@
       };
       socket.onmessage = function(event) {
         if (socket !== self.ws) return;
-        try { var msg = JSON.parse(event.data); if (self.onMessage) self.onMessage(msg); } catch {}
+        try {
+          var msg = JSON.parse(event.data);
+          // Record the address as known-good only once the desktop actually accepts
+          // this device (a real authenticated message), not on the bare WS upgrade —
+          // a host that merely answers /ws must not be able to seed the rotation.
+          if (!self._endpointRecorded && msg && (msg.type === "snapshot" || msg.type === "approval_snapshot" || msg.type === "paired")) {
+            self._endpointRecorded = true;
+            self._recordEndpoint(self.config.host, self.config.port, secure);
+          }
+          if (self.onMessage) self.onMessage(msg);
+        } catch {}
       };
       socket.onclose = function(event) {
         if (socket !== self.ws) return; // stale socket — ignore
+        clearTimeout(connectTimer);
         if (event.code === 1008) {
           // A rejected durable connect means the device was revoked (or the
           // registry was reset). Drop the stale pairing; re-bootstrap if a
@@ -366,7 +456,65 @@
         showToast(t("toast_reconnecting"), "info", true);
       }
       var self = this;
-      this.reconnectTimer = setTimeout(function() { self.reconnectDelay = Math.min(self.reconnectDelay * 2, self.maxReconnectDelay); self._doConnect(); }, this.reconnectDelay);
+      this.reconnectTimer = setTimeout(function() {
+        self.reconnectDelay = Math.min(self.reconnectDelay * 2, self.maxReconnectDelay);
+        // Every few failed attempts, rotate to the next known address. This both
+        // rediscovers a moved port on the same host (the live origin is candidate 0)
+        // and recovers a paired device whose launch origin died — e.g. the laptop
+        // moved networks and got a new IP — by cycling through the addresses it has
+        // connected to before until one answers. Reset the backoff on a real switch
+        // so each fresh candidate gets a fast first try instead of a 30s wait.
+        if (self.config && self.retryCount % 3 === 0) {
+          var seq = self._connectSeq;
+          self._rotateTarget().then(function(rotated) {
+            // A foreground reconnect or a user scan may have started a fresh attempt
+            // while the live-origin probe was in flight — don't clobber it.
+            if (self._connectSeq !== seq) return;
+            if (rotated) self.reconnectDelay = 1000;
+            self._doConnect();
+          });
+          return;
+        }
+        self._doConnect();
+      }, this.reconnectDelay);
+    }
+
+    // Pick the next reconnect candidate from [live launch origin, ...known
+    // endpoints], deduped by host:port. Resolves true only when it actually switched
+    // to a different address (so the caller can reset the backoff). Never rejects —
+    // the live-origin probe degrades to the frozen location target on failure.
+    _rotateTarget() {
+      var self = this;
+      var prevKey = this.config ? this.config.host + ":" + this.config.port : "";
+      var resolveLive = this.onResolveTarget
+        ? Promise.resolve().then(function() { return self.onResolveTarget(); }).catch(function() { return null; })
+        : Promise.resolve(null);
+      return resolveLive.then(function(live) {
+        var candidates = [];
+        var seen = {};
+        var push = function(c) {
+          if (!c || !c.host || !c.port) return;
+          var key = c.host + ":" + c.port;
+          if (seen[key]) return;
+          seen[key] = true;
+          candidates.push({ host: c.host, port: c.port, secure: !!c.secure });
+        };
+        push(live);
+        self._loadEndpoints().forEach(push);
+        if (!self.config) return false;
+        // One unique address: keep retrying it, but fold in any freshly-resolved
+        // live port (the same-host, moved-port case the original self-heal handled).
+        if (candidates.length < 2) {
+          if (live) { self.config.host = live.host; self.config.port = live.port; self.config.secure = !!live.secure; }
+          return (self.config.host + ":" + self.config.port) !== prevKey;
+        }
+        self._candidateIdx = (self._candidateIdx + 1) % candidates.length;
+        var next = candidates[self._candidateIdx];
+        self.config.host = next.host;
+        self.config.port = next.port;
+        self.config.secure = next.secure;
+        return (next.host + ":" + next.port) !== prevKey;
+      });
     }
 
     _setState(state) { this.state = state; if (this.onStateChange) this.onStateChange(state); }
@@ -390,6 +538,21 @@
         }
       }
       localStorage.setItem("clawd-history", JSON.stringify(history));
+    }
+
+    // Known reachable addresses (durable re-point targets), separate from the
+    // token-bearing clawd-history. Recorded only after the desktop authenticates
+    // this device (see onmessage), so a host that merely answers /ws can't seed the
+    // reconnect rotation.
+    _loadEndpoints() {
+      try { var a = JSON.parse(localStorage.getItem("clawd-endpoints") || "[]"); return Array.isArray(a) ? a : []; } catch { return []; }
+    }
+    getEndpoints() { return this._loadEndpoints(); }
+    _recordEndpoint(host, port, secure) {
+      if (!host || !port) return;
+      var list = this._loadEndpoints().filter(function(e) { return !(e && e.host === host && e.port === port); });
+      list.unshift({ host: host, port: port, secure: !!secure });
+      try { localStorage.setItem("clawd-endpoints", JSON.stringify(list.slice(0, 5))); } catch {}
     }
 
     _bindVisibility() {
@@ -418,7 +581,7 @@
   // === SessionRenderer ===
 
   class SessionRenderer {
-    constructor(container) { this.container = container; this.sessions = new Map(); this.staleTimer = null; this.expandedSet = new Set(); this.onSelect = null; this.unpaired = false; this.onPair = null; this._startTimerUpdater(); }
+    constructor(container) { this.container = container; this.sessions = new Map(); this.staleTimer = null; this.expandedSet = new Set(); this.onSelect = null; this.unpaired = false; this.onPair = null; this.onScan = null; this.canScan = false; this._startTimerUpdater(); }
 
     updateFromSnapshot(sessions) {
       this.sessions.clear();
@@ -461,8 +624,13 @@
           if (goBtn) goBtn.addEventListener("click", function() { if (self.onPair) self.onPair(); });
           return;
         }
+        var scanCta = this.canScan
+          ? '<button class="scan-cta" id="btn-scan-cta">' + icon("scan") + '<span>' + esc(t("scan_reconnect")) + '</span></button>'
+          : '';
         this.container.innerHTML = '<div class="empty-state"><div class="empty-icon">' + icon("paw") + '</div>' +
-          '<div class="empty-text">' + esc(t("empty_connect")) + '</div><div class="empty-hint">' + esc(t("empty_connect_hint")) + '</div></div>';
+          '<div class="empty-text">' + esc(t("empty_connect")) + '</div><div class="empty-hint">' + esc(t("empty_connect_hint")) + '</div>' + scanCta + '</div>';
+        var scanBtn = this.container.querySelector("#btn-scan-cta");
+        if (scanBtn) scanBtn.addEventListener("click", function() { if (self.onScan) self.onScan(); });
         return;
       }
 
@@ -559,7 +727,7 @@
   // === SettingsRenderer ===
 
   class SettingsRenderer {
-    constructor(container) { this.container = container; this.onSubmitCode = null; this.codeError = null; }
+    constructor(container) { this.container = container; this.onSubmitCode = null; this.onDisconnect = null; this.onScan = null; this.codeError = null; this._confirmDisconnect = false; }
 
     render(connection, push) {
       var html = '';
@@ -581,6 +749,8 @@
       html += '<span class="settings-value">' + esc(paired ? t("pair_paired") : t("pair_unpaired")) + '</span></div>';
       if (paired) {
         html += '<div class="settings-hint">' + esc(t("pair_hint")) + '</div>';
+        html += '<button class="settings-action-btn off scan-inline" id="btn-scan-reconnect">' + icon("scan") + '<span>' + esc(t("scan_reconnect")) + '</span></button>';
+        html += '<button class="settings-action-btn off" id="btn-disconnect">' + esc(t("pair_disconnect")) + '</button>';
       } else {
         html += this._renderCodeEntry();
       }
@@ -643,6 +813,27 @@
           });
         });
       }
+
+      // Bind disconnect — two-tap confirm (no native dialog) guards an accidental unpair.
+      var disBtn = document.getElementById("btn-disconnect");
+      if (disBtn) {
+        var self = this;
+        this._confirmDisconnect = false;
+        disBtn.addEventListener("click", function() {
+          if (!self._confirmDisconnect) {
+            self._confirmDisconnect = true;
+            disBtn.textContent = t("pair_disconnect_confirm");
+            disBtn.classList.add("on");
+            return;
+          }
+          self._confirmDisconnect = false;
+          if (self.onDisconnect) self.onDisconnect();
+        });
+      }
+
+      // Bind scan-to-reconnect (re-point the durable credential at a new address)
+      var scanReBtn = document.getElementById("btn-scan-reconnect");
+      if (scanReBtn) { var sr = this; scanReBtn.addEventListener("click", function() { if (sr.onScan) sr.onScan(); }); }
 
       // Bind language picker
       var langSel = document.getElementById("lang-select");
@@ -999,6 +1190,7 @@
       this.detail = new DetailRenderer(document.getElementById("detail-overlay"));
       this.push = new PushController(this.connection);
       this.notifier = new NotificationManager();
+      this.scanner = (typeof window.QrScanner === "function") ? new window.QrScanner() : null;
       this.activeTab = "sessions";
       this._pendingDeepLink = null;
 
@@ -1008,6 +1200,7 @@
       this._bindConnection();
       this._bindApprovals();
       this._bindDetail();
+      this._bindScanner();
       this._bindServiceWorkerMessages();
       this.renderer.startStaleCleanup();
 
@@ -1053,6 +1246,53 @@
       };
     }
 
+    _bindScanner() {
+      var self = this;
+      var open = function() { self._openScanner(); };
+      this.renderer.onScan = open;
+      this.settingsRenderer.onScan = open;
+      this._refreshScanCta();
+    }
+
+    _openScanner() {
+      if (!this.scanner) { showToast(t("scan_camera_denied"), "error"); return; }
+      var self = this;
+      this.scanner.open(function(text) { self._handleScannedText(text); });
+    }
+
+    // A scanned desktop QR carries the live host:port (token-free). Re-point the
+    // existing connection at it — a paired device reconnects with its durable
+    // credential, no re-pairing and no app reinstall. The /mobile path guard keeps
+    // a stray QR from steering the connection (and its credential) somewhere random.
+    _handleScannedText(text) {
+      var url;
+      try { url = new URL(String(text || "").trim()); } catch (e) { showToast(t("scan_unsupported"), "error"); return; }
+      if (!/^https?:$/.test(url.protocol) || !url.hostname || !/^\/mobile(\/|$)/.test(url.pathname)) {
+        showToast(t("scan_unsupported"), "error");
+        return;
+      }
+      // The durable credential goes out in the WS query, so it must never leave the
+      // LAN — only re-point at a local-network host. Defeats a malicious QR that
+      // would otherwise exfiltrate the secret to a public server.
+      if (!isLanHost(url.hostname)) { showToast(t("scan_not_lan"), "error"); return; }
+      var secure = url.protocol === "https:";
+      var port = parseInt(url.port, 10) || (secure ? 443 : 80);
+      var token = url.searchParams.get("token") || null;
+      this.connection.repoint({ host: url.hostname, port: port, secure: secure, token: token });
+      // "info", not "success": this only starts the attempt — the header status pill
+      // and onOpen report the real connected/failed outcome a moment later.
+      showToast(t("scan_repointed", { addr: url.hostname + ":" + port }), "info");
+    }
+
+    // The scan affordance is only useful when there's a credential/address to
+    // reconnect with and we're not already connected.
+    _refreshScanCta() {
+      var show = this.connection.state !== "connected"
+        && (this.connection.isPaired() || this.connection.getEndpoints().length > 0);
+      this.renderer.canScan = show;
+      if (this.activeTab === "sessions" && this.renderer.sessions.size === 0) this.renderer.render();
+    }
+
     _bindServiceWorkerMessages() {
       var self = this;
       if (!("serviceWorker" in navigator)) return;
@@ -1080,6 +1320,29 @@
       return { host: host, port: port, secure: location.protocol === "https:" };
     }
 
+    // Rebuild the WS target from the desktop's LIVE port (/api/connection-info)
+    // before connecting, so a server that moved its port is rediscovered instead of
+    // dialing the frozen launch port forever. The host is kept from location (never
+    // swapped to info.lanIp) so clawd.local stays clawd.local and the cert SAN matches.
+    _resolveTarget() {
+      var fallback = this._locationTarget();
+      var secure = !!(fallback && fallback.secure);
+      // Bound the probe: at a new location the frozen launch origin is unreachable,
+      // and a hanging fetch would stall the reconnect rotation for the TCP timeout.
+      var ctrl = (typeof AbortController !== "undefined") ? new AbortController() : null;
+      var timer = ctrl ? setTimeout(function() { try { ctrl.abort(); } catch (e) {} }, 2500) : null;
+      return fetch("/api/connection-info", ctrl ? { signal: ctrl.signal } : undefined)
+        .then(function(r) { return r.json(); })
+        .then(function(info) {
+          if (timer) clearTimeout(timer);
+          if (!info || !fallback) return fallback;
+          var livePort = secure ? info.httpsPort : info.port;
+          if (!livePort) return fallback;
+          return { host: fallback.host, port: parseInt(livePort, 10), secure: secure };
+        })
+        .catch(function() { if (timer) clearTimeout(timer); return fallback; });
+    }
+
     _autoConnect() {
       var params = new URLSearchParams(window.location.search);
       var urlHost = params.get("host");
@@ -1096,9 +1359,15 @@
       // it has no URL token and its own empty storage, but it IS served from the
       // desktop, and the durable credential lives in that same storage.
       if (this.connection.isPaired()) {
-        var target = this._locationTarget() || stored
+        var self = this;
+        var fallbackTarget = this._locationTarget() || stored
           || (hasUrl ? { host: urlHost, port: parseInt(urlPort, 10), secure: urlSecure } : null);
-        if (target) { this.connection.connect(target); return; }
+        if (fallbackTarget) {
+          this._resolveTarget().then(function(target) {
+            self.connection.connect(target || fallbackTarget);
+          });
+          return;
+        }
       }
 
       // A URL token wins only when it points somewhere new (a fresh scan, or a
@@ -1148,6 +1417,7 @@
       this.connection.onStateChange = function(state) {
         self._updateConnectionStatus(state);
         if (state === "connected") self.notifier.requestPermission();
+        self._refreshScanCta();
         if (self.activeTab === "settings") self._renderSettings();
       };
       this.connection.onOpen = function() {
@@ -1161,9 +1431,14 @@
         self.setUnpaired(true);
         showToast(t("code_rejected"), "error");
       };
+      this.connection.onResolveTarget = function() { return self._resolveTarget(); };
       this.settingsRenderer.onSubmitCode = function(code) {
         self.settingsRenderer.codeError = null;
         self.connection.connectWithCode(code);
+      };
+      this.settingsRenderer.onDisconnect = function() {
+        self.connection.forget();
+        self.setUnpaired(true); // already re-renders settings when that tab is active
       };
       this.renderer.onPair = function() { self._switchTab("settings"); };
       this.connection.onMessage = function(msg) {
@@ -1187,6 +1462,7 @@
           self.approvals.setApproveContext(true, self.connection.isSecureConnection());
           log("Paired as " + msg.deviceId);
           self.setUnpaired(false);
+          self._refreshScanCta();
         }
         else if (msg.type === "pair_error") { log("Pair error: " + (msg.message || "")); }
         else if (msg.type === "approval_snapshot") {

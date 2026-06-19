@@ -4,6 +4,7 @@ const { describe, it, before, after, beforeEach } = require("node:test");
 const assert = require("node:assert");
 const WebSocket = require("ws");
 const http = require("http");
+const net = require("net");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -88,6 +89,42 @@ function httpGet(port, pathStr) {
   });
 }
 
+function getFreePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.listen(0, "0.0.0.0", () => {
+      const p = srv.address().port;
+      srv.close(() => resolve(p));
+    });
+    srv.on("error", reject);
+  });
+}
+
+function occupy(port) {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.on("error", reject);
+    srv.listen(port, "0.0.0.0", () => resolve(srv));
+  });
+}
+
+// The server now binds the EXACT configured port (no range-walk). A real clawd
+// instance on the default 23334 would otherwise collide with these suites, so the
+// wrapper pins an OS-assigned ephemeral port (set per-suite in before()) unless
+// the test chose its own. Servers that restart within a suite rebind the same
+// port; the bound port is read back via start()'s return / server.getPort().
+let TEST_HTTP_PORT = 23334;
+function initServer(ctx) {
+  const userSnap = ctx && ctx.getSettingsSnapshot;
+  return initMobilePreviewServer({
+    ...ctx,
+    getSettingsSnapshot: () => {
+      const snap = userSnap ? userSnap() : {};
+      return Number.isInteger(snap.mobilePort) ? snap : { ...snap, mobilePort: TEST_HTTP_PORT };
+    },
+  });
+}
+
 function waitForClose(ws, timeoutMs = 3000) {
   return new Promise((resolve) => {
     const timer = setTimeout(() => resolve(null), timeoutMs);
@@ -118,8 +155,10 @@ describe("Mobile Preview Server", () => {
 
   before(async () => {
     tmpTokenDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-test-"));
-    server = initMobilePreviewServer({
+    const freePort = await getFreePort();
+    server = initServer({
       sessions,
+      getSettingsSnapshot: () => ({ mobilePort: freePort }),
       getPendingPermissions: () => pendingPermissions,
       tokenPath: path.join(tmpTokenDir, "mobile-token.json"),
     });
@@ -275,9 +314,10 @@ describe("Token Rotation", () => {
   const sessions = new Map();
 
   before(async () => {
+    TEST_HTTP_PORT = await getFreePort();
     tmpTokenDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-rotate-"));
     tokenFile = path.join(tmpTokenDir, "token.json");
-    server = initMobilePreviewServer({
+    server = initServer({
       sessions,
       tokenPath: tokenFile,
     });
@@ -304,7 +344,7 @@ describe("Token Rotation", () => {
     // Reload server with the rotated state
     server.cleanup();
     await new Promise((r) => setTimeout(r, 200));
-    server = initMobilePreviewServer({
+    server = initServer({
       sessions,
       tokenPath: tokenFile,
     });
@@ -334,7 +374,7 @@ describe("Token Rotation", () => {
     // Reload with expired grace
     server.cleanup();
     await new Promise((r) => setTimeout(r, 200));
-    server = initMobilePreviewServer({
+    server = initServer({
       sessions,
       tokenPath: tokenFile,
     });
@@ -351,7 +391,7 @@ describe("Token Rotation", () => {
     // Reload fresh token state
     server.cleanup();
     await new Promise((r) => setTimeout(r, 200));
-    server = initMobilePreviewServer({
+    server = initServer({
       sessions,
       tokenPath: tokenFile,
     });
@@ -391,7 +431,7 @@ describe("Token Rotation", () => {
     // Reload fresh token state
     server.cleanup();
     await new Promise((r) => setTimeout(r, 200));
-    server = initMobilePreviewServer({
+    server = initServer({
       sessions,
       tokenPath: tokenFile,
     });
@@ -424,7 +464,7 @@ describe("Token Rotation", () => {
     // Reload fresh token state
     server.cleanup();
     await new Promise((r) => setTimeout(r, 200));
-    server = initMobilePreviewServer({
+    server = initServer({
       sessions,
       tokenPath: tokenFile,
     });
@@ -449,7 +489,7 @@ describe("Token Rotation", () => {
     const oldToken = "abcdef01".repeat(4); // 32 hex chars
     fs.writeFileSync(tokenFile, JSON.stringify({ token: oldToken }, null, 2));
 
-    server = initMobilePreviewServer({
+    server = initServer({
       sessions,
       tokenPath: tokenFile,
     });
@@ -480,7 +520,7 @@ describe("Token Rotation", () => {
     // Reload fresh token state
     server.cleanup();
     await new Promise((r) => setTimeout(r, 200));
-    server = initMobilePreviewServer({
+    server = initServer({
       sessions,
       tokenPath: tokenFile,
     });
@@ -510,7 +550,7 @@ describe("Token Rotation", () => {
     // Reload fresh token state
     server.cleanup();
     await new Promise((r) => setTimeout(r, 200));
-    server = initMobilePreviewServer({
+    server = initServer({
       sessions,
       tokenPath: tokenFile,
     });
@@ -539,7 +579,7 @@ describe("Token Rotation", () => {
     // Reload fresh token state
     server.cleanup();
     await new Promise((r) => setTimeout(r, 200));
-    server = initMobilePreviewServer({
+    server = initServer({
       sessions,
       tokenPath: tokenFile,
     });
@@ -569,7 +609,7 @@ describe("Token Rotation", () => {
     // Write a fresh token file to get a clean state
     const freshToken = "deadbeef".repeat(4);
     fs.writeFileSync(tokenFile, JSON.stringify({ token: freshToken }, null, 2));
-    server = initMobilePreviewServer({
+    server = initServer({
       sessions,
       tokenPath: tokenFile,
     });
@@ -605,7 +645,7 @@ describe("Token Rotation", () => {
     const legacyToken = "face0ff0".repeat(4);
     fs.writeFileSync(tokenFile, JSON.stringify({ token: legacyToken }, null, 2));
 
-    server = initMobilePreviewServer({
+    server = initServer({
       sessions,
       tokenPath: tokenFile,
     });
@@ -639,7 +679,7 @@ describe("Token Rotation", () => {
     // Reload server to pick up the new state
     server.cleanup();
     await new Promise((r) => setTimeout(r, 200));
-    server = initMobilePreviewServer({
+    server = initServer({
       sessions,
       tokenPath: tokenFile,
     });
@@ -674,7 +714,8 @@ describe("Rotate-on-use", () => {
   let tokenFile;
   const sessions = new Map();
 
-  before(() => {
+  before(async () => {
+    TEST_HTTP_PORT = await getFreePort();
     tmpTokenDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-rou-"));
     tokenFile = path.join(tmpTokenDir, "token.json");
   });
@@ -694,7 +735,7 @@ describe("Rotate-on-use", () => {
       rotationPending: false,
     }, null, 2));
 
-    const server = initMobilePreviewServer({
+    const server = initServer({
       sessions,
       tokenPath: tokenFile,
       writeTokenState: () => false,
@@ -725,7 +766,7 @@ describe("Rotate-on-use", () => {
       rotationPending: false,
     }, null, 2));
 
-    const server = initMobilePreviewServer({ sessions, tokenPath: tokenFile });
+    const server = initServer({ sessions, tokenPath: tokenFile });
     await server.start();
     // No clients connect — timer fires at ~0ms
     await new Promise((r) => setTimeout(r, 500));
@@ -751,7 +792,7 @@ describe("Rotate-on-use", () => {
       rotationPending: true,
     }, null, 2));
 
-    const server = initMobilePreviewServer({ sessions, tokenPath: tokenFile });
+    const server = initServer({ sessions, tokenPath: tokenFile });
     const port = await server.start();
 
     const client = connectClient(port, testToken);
@@ -785,7 +826,7 @@ describe("Rotate-on-use", () => {
       rotationPending: true,
     }, null, 2));
 
-    const server = initMobilePreviewServer({
+    const server = initServer({
       sessions,
       tokenPath: tokenFile,
       writeTokenState: () => false,
@@ -820,7 +861,7 @@ describe("Rotate-on-use", () => {
       rotationPending: true,
     }, null, 2));
 
-    const server = initMobilePreviewServer({ sessions, tokenPath: tokenFile });
+    const server = initServer({ sessions, tokenPath: tokenFile });
     await server.start();
 
     const newToken = server.regenerateToken();
@@ -846,7 +887,7 @@ describe("Rotate-on-use", () => {
       rotationPending: true,
     }, null, 2));
 
-    const server = initMobilePreviewServer({ sessions, tokenPath: tokenFile });
+    const server = initServer({ sessions, tokenPath: tokenFile });
     const port = await server.start();
 
     // Wait — scheduleRotation should early-exit when rotationPending=true
@@ -878,7 +919,7 @@ describe("Rotate-on-use", () => {
       rotationPending: true,
     }, null, 2));
 
-    const server = initMobilePreviewServer({ sessions, tokenPath: tokenFile });
+    const server = initServer({ sessions, tokenPath: tokenFile });
     const port = await server.start();
 
     const client1 = connectClient(port, testToken);
@@ -972,7 +1013,8 @@ describe("Mobile Preview v2 — approvals + pairing", () => {
     };
   }
 
-  before(() => {
+  before(async () => {
+    TEST_HTTP_PORT = await getFreePort();
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-v2-"));
   });
 
@@ -986,7 +1028,7 @@ describe("Mobile Preview v2 — approvals + pairing", () => {
     if (server) { server.cleanup(); await new Promise((r) => setTimeout(r, 100)); }
     sessions.clear();
     settings = { mobileApprovalsEnabled: true };
-    server = initMobilePreviewServer(ctxPaths(extra));
+    server = initServer(ctxPaths(extra));
     port = await server.start();
     token = server.getToken();
     return server;
@@ -1133,8 +1175,9 @@ describe("Mobile Preview v2 — public HTTP endpoints", () => {
   const sessions = new Map();
 
   before(async () => {
+    TEST_HTTP_PORT = await getFreePort();
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-v2-http-"));
-    server = initMobilePreviewServer({
+    server = initServer({
       sessions,
       getSettingsSnapshot: () => ({ mobileApprovalsEnabled: true }),
       tokenPath: path.join(tmpDir, "mobile-token.json"),
@@ -1236,7 +1279,8 @@ describe("Mobile Preview v2 — typed pairing code", () => {
     };
   }
 
-  before(() => {
+  before(async () => {
+    TEST_HTTP_PORT = await getFreePort();
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-code-"));
   });
 
@@ -1251,7 +1295,7 @@ describe("Mobile Preview v2 — typed pairing code", () => {
     sessions.clear();
     clock = 1700000000000;
     settings = { mobileApprovalsEnabled: true };
-    server = initMobilePreviewServer(ctxPaths(extra));
+    server = initServer(ctxPaths(extra));
     port = await server.start();
     return server;
   }
@@ -1385,9 +1429,10 @@ describe("Mobile Preview v2 — desktop language handoff", () => {
   const sessions = new Map();
 
   before(async () => {
+    TEST_HTTP_PORT = await getFreePort();
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-lang-"));
     settings = { mobileApprovalsEnabled: true, lang: "ja" };
-    server = initMobilePreviewServer({
+    server = initServer({
       sessions,
       getSettingsSnapshot: () => settings,
       tokenPath: path.join(tmpDir, "mobile-token.json"),
@@ -1423,5 +1468,86 @@ describe("Mobile Preview v2 — desktop language handoff", () => {
     delete settings.lang;
     const res = await httpGet(port, "/api/connection-info");
     assert.strictEqual(JSON.parse(res.body).desktopLanguage, "en");
+  });
+});
+
+// ── Fixed-port binding (no silent drift — the reconnect cure) ──
+
+describe("Mobile Preview — fixed configured port", () => {
+  let tmpDir;
+  let servers = [];
+  const sessions = new Map();
+
+  function makeServer(settings) {
+    const s = initMobilePreviewServer({
+      sessions,
+      getSettingsSnapshot: () => settings,
+      tokenPath: path.join(tmpDir, "mobile-token.json"),
+      tlsDir: path.join(tmpDir, "tls"),
+      vapidPath: path.join(tmpDir, "vapid.json"),
+      subsPath: path.join(tmpDir, "push-subs.json"),
+      devicesPath: path.join(tmpDir, "mobile-devices.json"),
+    });
+    servers.push(s);
+    return s;
+  }
+
+  before(() => { tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-port-")); });
+
+  after(() => {
+    for (const s of servers) { try { s.cleanup(); } catch {} }
+    servers = [];
+    sessions.clear();
+    try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+  });
+
+  it("binds the EXACT configured mobilePort", async () => {
+    const want = await getFreePort();
+    const server = makeServer({ mobilePort: want });
+    const bound = await server.start();
+    assert.strictEqual(bound, want, "must bind the configured port, not a drifted one");
+    assert.strictEqual(server.getPort(), want);
+
+    const res = await httpGet(want, "/api/connection-info");
+    assert.strictEqual(JSON.parse(res.body).port, want);
+    server.cleanup();
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it("an occupied configured port yields an error and does NOT drift to port+1", async () => {
+    const want = await getFreePort();
+    const blocker = await occupy(want);
+    try {
+      const server = makeServer({ mobilePort: want });
+      const bound = await server.start();
+      assert.strictEqual(bound, null, "start() resolves null on bind failure (no crash, no drift)");
+      assert.strictEqual(server.getPort(), null, "activePort must not be a different port");
+      assert.ok(server.getHttpError(), "a clear HTTP bind error is recorded");
+
+      // The neighbouring port must NOT be in use by us (no range-walk happened).
+      let neighbourFree = false;
+      try {
+        const probe = await occupy(want + 1);
+        neighbourFree = true;
+        await new Promise((r) => probe.close(r));
+      } catch {}
+      assert.ok(neighbourFree, "server must not have silently taken port+1");
+    } finally {
+      await new Promise((r) => blocker.close(r));
+    }
+  });
+
+  it("falls back to the default port when mobilePort is unset", async () => {
+    // Default 23334 may be occupied in the dev env, so just assert it ATTEMPTS the
+    // default (not a random drift) by checking the recorded port/error pair.
+    const server = makeServer({});
+    const bound = await server.start();
+    if (bound !== null) {
+      assert.strictEqual(bound, 23334, "unset port falls back to DEFAULT_PORT");
+    } else {
+      assert.ok(/23334/.test(server.getHttpError() || ""), "error names the default port");
+    }
+    server.cleanup();
+    await new Promise((r) => setTimeout(r, 100));
   });
 });

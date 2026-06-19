@@ -175,9 +175,36 @@ body { display: flex; flex-direction: column; height: 100%; }
 .detail-focus-btn { width: 100%; padding: 11px; border: none; border-radius: 8px; background: var(--accent); color: #fff; font-size: 1.077rem; font-weight: 600; cursor: pointer; transition: transform 0.1s; margin-top: 2px; }
 .detail-focus-btn:active { transform: scale(0.98); }
 
+/* === QR Scanner Overlay === */
+/* Sits above the detail overlay but below toasts (2000) so error toasts (camera
+   denied / unreadable) stay visible while it's open. */
+#scanner-overlay { position: fixed; inset: 0; z-index: 1800; background: var(--bg); display: flex; flex-direction: column; padding-top: var(--safe-top); padding-bottom: var(--safe-bottom); animation: toast-in 0.2s ease-out; }
+.scanner-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; flex-shrink: 0; }
+.scanner-title { font-size: 1.231rem; font-weight: 600; color: var(--text); }
+.scanner-close { background: none; border: none; color: var(--muted); cursor: pointer; display: flex; align-items: center; padding: 4px; }
+.scanner-close svg { width: 20px; height: 20px; }
+.scanner-stage { flex: 1; min-height: 0; position: relative; margin: 0 16px; border-radius: var(--radius); overflow: hidden; background: #000; display: flex; align-items: center; justify-content: center; }
+.scanner-video { width: 100%; height: 100%; object-fit: cover; }
+.scanner-frame { position: absolute; width: 62%; max-width: 260px; aspect-ratio: 1; border: 2px solid var(--accent); border-radius: var(--radius); box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.45); pointer-events: none; }
+.scanner-stage.photo-mode .scanner-frame { display: none; }
+.scanner-footer { flex-shrink: 0; display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 16px; }
+.scanner-hint { font-size: 1rem; color: var(--muted); text-align: center; line-height: 1.4; }
+.scanner-cancel-btn { padding: 10px 24px; border-radius: 8px; background: var(--bg); color: var(--text); border: 1px solid var(--card-border); font-size: 1.077rem; font-weight: 500; cursor: pointer; transition: transform 0.1s; }
+.scanner-cancel-btn:active { transform: scale(0.97); }
+.scanner-photo-btn { padding: 10px 24px; border-radius: 8px; background: var(--accent); color: #fff; border: none; font-size: 1.077rem; font-weight: 600; cursor: pointer; transition: transform 0.1s; }
+.scanner-photo-btn:active { transform: scale(0.97); }
+
+/* Scan CTA (sessions empty-state) + inline scan button (settings) */
+.scan-cta { margin-top: 4px; display: inline-flex; align-items: center; gap: 7px; padding: 9px 18px; border: none; border-radius: 8px; background: var(--accent); color: #fff; font-size: 1rem; font-weight: 600; cursor: pointer; transition: transform 0.1s; }
+.scan-cta svg { width: 18px; height: 18px; }
+.scan-cta:active { transform: scale(0.97); }
+.scan-inline { display: inline-flex; align-items: center; justify-content: center; gap: 7px; margin-top: 8px; }
+.scan-inline svg { width: 18px; height: 18px; }
+
 /* === Settings: notifications / pairing toggle === */
 .settings-action-btn { width: 100%; padding: 11px; border-radius: 8px; font-size: 1.077rem; font-weight: 500; cursor: pointer; transition: transform 0.1s, opacity 0.2s; }
 .settings-action-btn:active { transform: scale(0.98); }
+.settings-action-btn + .settings-action-btn { margin-top: 8px; }
 .settings-action-btn.on { background: var(--accent); color: #fff; border: none; }
 .settings-action-btn.off { background: var(--bg); color: var(--text); border: 1px solid var(--card-border); }
 .settings-hint { font-size: 0.923rem; color: var(--faint); margin-top: 8px; line-height: 1.4; }

@@ -3571,6 +3571,21 @@ html, body {
   color: var(--text-primary);
   cursor: pointer;
 }
+.mobile-port-input {
+  font-size: 13px;
+  width: 88px;
+  background: var(--sidebar-hover);
+  border: 1px solid var(--border, #3f3f46);
+  border-radius: 6px;
+  padding: 5px 10px;
+  color: var(--text-primary);
+}
+.mobile-port-input.mobile-port-invalid {
+  border-color: var(--danger, #ef4444);
+}
+.mobile-port-error {
+  margin-top: 4px;
+}
 .mobile-subsection {
   margin-top: 18px;
   padding-top: 14px;

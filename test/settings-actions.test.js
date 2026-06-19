@@ -107,6 +107,28 @@ describe("updateRegistry pure-data validators", () => {
     }
   });
 
+  it("mobile ports require integers in the 1024-65535 range", () => {
+    const deps = { snapshot: baseSnapshot };
+    for (const key of ["mobilePort", "mobileHttpsPort"]) {
+      assert.strictEqual(updateRegistry[key](1024, deps).status, "ok", `${key}(1024)`);
+      assert.strictEqual(updateRegistry[key](5504, deps).status, "ok", `${key}(5504)`);
+      assert.strictEqual(updateRegistry[key](65535, deps).status, "ok", `${key}(65535)`);
+      assert.strictEqual(updateRegistry[key](1023, deps).status, "error", `${key}(1023)`);
+      assert.strictEqual(updateRegistry[key](65536, deps).status, "error", `${key}(65536)`);
+      assert.strictEqual(updateRegistry[key](5504.5, deps).status, "error", `${key}(5504.5)`);
+      assert.strictEqual(updateRegistry[key]("5504", deps).status, "error", `${key}("5504")`);
+    }
+  });
+
+  // A settable pref missing from updateRegistry is silently rejected by
+  // applyUpdate — the bug where the mobile port inputs wouldn't save. Every
+  // mobile-* schema field must have a registry entry.
+  it("every mobile-* schema field is registered in updateRegistry", () => {
+    for (const key of Object.keys(prefs.getDefaults()).filter((k) => /^mobile/.test(k))) {
+      assert.ok(updateRegistry[key], `${key} missing from updateRegistry`);
+    }
+  });
+
   it("saved pixel sizes require non-negative finite numbers", () => {
     const deps = { snapshot: baseSnapshot };
     for (const key of ["savedPixelWidth", "savedPixelHeight"]) {

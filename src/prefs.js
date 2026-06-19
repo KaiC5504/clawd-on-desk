@@ -190,6 +190,19 @@ const SCHEMA = {
   mobileApprovalsEnabled: { type: "boolean", default: false },
   // HTTPS listener (self-signed CA) for iOS Web Push + secure-context PWA.
   mobileHttpsEnabled: { type: "boolean", default: false },
+  // Fixed listener ports. An installed iOS A2HS app freezes its launch host:port,
+  // so the desktop must bind the SAME port every start or a paired phone dials a
+  // dead port forever. User-chosen + persisted so it never silently drifts.
+  mobilePort: {
+    type: "number",
+    default: 23334,
+    validate: (v) => Number.isInteger(v) && v >= 1024 && v <= 65535,
+  },
+  mobileHttpsPort: {
+    type: "number",
+    default: 23339,
+    validate: (v) => Number.isInteger(v) && v >= 1024 && v <= 65535,
+  },
   // Remembers that the user confirmed the iPhone trusts the CA (drives the
   // setup wizard's "trusted" status pill; purely a UI hint, no security weight).
   mobileCertTrustedHint: { type: "boolean", default: false },

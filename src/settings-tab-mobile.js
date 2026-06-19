@@ -192,6 +192,69 @@
     return row;
   }
 
+  // A fixed-port input. Editing it persists the pref (validated 1024-65535) which
+  // restarts the listener main-side. iOS A2HS freezes its launch port, so a stable
+  // port is what keeps a paired phone reconnecting after a desktop restart.
+  function buildPortRow(prefKey, titleKey, descKey) {
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML =
+      `<div class="row-text">` +
+        `<span class="row-label"></span>` +
+        `<span class="row-desc"></span>` +
+      `</div>` +
+      `<div class="row-control"></div>`;
+    row.querySelector(".row-label").textContent = t(titleKey);
+    row.querySelector(".row-desc").textContent = t(descKey);
+
+    const input = document.createElement("input");
+    input.type = "number";
+    input.className = "mobile-port-input";
+    input.min = "1024";
+    input.max = "65535";
+    input.step = "1";
+    const current = snapshot()[prefKey];
+    if (Number.isInteger(current)) input.value = String(current);
+
+    const commit = () => {
+      const val = parseInt(input.value, 10);
+      input.classList.remove("mobile-port-invalid");
+      if (!Number.isInteger(val) || val < 1024 || val > 65535) {
+        input.classList.add("mobile-port-invalid");
+        input.title = t("mobilePortInvalid");
+        return;
+      }
+      input.title = "";
+      if (val === snapshot()[prefKey]) return;
+      if (window.settingsAPI && typeof window.settingsAPI.update === "function") {
+        window.settingsAPI.update(prefKey, val);
+        // The listener restart is debounced (~300ms) and a busy port retries for
+        // ~3s before the failure is recorded, so re-check the bind result after it
+        // settles rather than making the user leave and re-enter the tab.
+        const errSlot = row.parentNode && row.parentNode.querySelector(".mobile-port-error");
+        if (errSlot) {
+          setTimeout(() => renderPortBindError(errSlot), 800);
+          setTimeout(() => renderPortBindError(errSlot), 4000);
+        }
+      }
+    };
+    input.addEventListener("change", commit);
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") input.blur(); });
+
+    row.querySelector(".row-control").appendChild(input);
+    return row;
+  }
+
+  // Surfaces an HTTP bind failure (e.g. the chosen port is occupied) under the
+  // port inputs, so a silent "starting…" forever can't hide it.
+  function renderPortBindError(container) {
+    container.innerHTML = "";
+    fetchMobileInfo().then((info) => {
+      if (!container.parentNode || !info || info.status !== "error" || !info.lastError) return;
+      container.innerHTML = `<p class="mobile-info-error">${escapeHtml(info.lastError)}</p>`;
+    });
+  }
+
   function stopHttpsPoll() {
     if (httpsPollTimer) { clearTimeout(httpsPollTimer); httpsPollTimer = null; }
   }
@@ -493,6 +556,14 @@
 
     // 2. Connection mode
     v2Container.appendChild(buildConnectionModeRow());
+
+    // 2b. Fixed ports (drift-proof reconnect — see buildPortRow)
+    v2Container.appendChild(buildPortRow("mobilePort", "mobilePortTitle", "mobilePortDesc"));
+    v2Container.appendChild(buildPortRow("mobileHttpsPort", "mobileHttpsPortTitle", "mobileHttpsPortDesc"));
+    const portErrSlot = document.createElement("div");
+    portErrSlot.className = "mobile-port-error";
+    v2Container.appendChild(portErrSlot);
+    renderPortBindError(portErrSlot);
 
     // 3. HTTPS toggle + cert panel
     v2Container.appendChild(helpers.buildSwitchRow({

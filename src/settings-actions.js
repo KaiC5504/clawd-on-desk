@@ -291,6 +291,8 @@ const updateRegistry = {
   mobileHttpsEnabled: requireBoolean("mobileHttpsEnabled"),
   mobileCertTrustedHint: requireBoolean("mobileCertTrustedHint"),
   mobileConnectionMode: requireEnum("mobileConnectionMode", ["lan", "tailscale"]),
+  mobilePort: requireIntegerInRange("mobilePort", 1024, 65535),
+  mobileHttpsPort: requireIntegerInRange("mobileHttpsPort", 1024, 65535),
 
   // ── System-backed prefs (object-form: validate + effect pre-commit gate) ──
   autoStartWithClaude,
