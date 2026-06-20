@@ -193,6 +193,38 @@ const SCHEMA = {
   },
   lowPowerIdleMode: { type: "boolean", default: false },
   mobilePreviewEnabled: { type: "boolean", default: false },
+  // Mobile interactive-approval surface (iPhone PWA). Off by default: a paired
+  // phone can monitor, but decision/focus messages are rejected until opted in.
+  mobileApprovalsEnabled: { type: "boolean", default: false },
+  // Live transcript streaming to the paired phone. Both default false —
+  // transcript is read-confidential and must be explicitly opted in per device.
+  mobileTranscriptEnabled: { type: "boolean", default: false },
+  mobileTranscriptToolOutput: { type: "boolean", default: false },
+  // HTTPS listener (self-signed CA) for iOS Web Push + secure-context PWA.
+  mobileHttpsEnabled: { type: "boolean", default: false },
+  // Fixed listener ports. An installed iOS A2HS app freezes its launch host:port,
+  // so the desktop must bind the SAME port every start or a paired phone dials a
+  // dead port forever. User-chosen + persisted so it never silently drifts.
+  mobilePort: {
+    type: "number",
+    default: 23334,
+    validate: (v) => Number.isInteger(v) && v >= 1024 && v <= 65535,
+  },
+  mobileHttpsPort: {
+    type: "number",
+    default: 23339,
+    validate: (v) => Number.isInteger(v) && v >= 1024 && v <= 65535,
+  },
+  // Remembers that the user confirmed the iPhone trusts the CA (drives the
+  // setup wizard's "trusted" status pill; purely a UI hint, no security weight).
+  mobileCertTrustedHint: { type: "boolean", default: false },
+  // "lan" = self-signed CA on the home network (default); "tailscale" = reach
+  // the desktop over the tailnet with a real cert (no CA ritual).
+  mobileConnectionMode: {
+    type: "string",
+    default: "lan",
+    validate: (v) => v === "lan" || v === "tailscale",
+  },
   // When true, prevent the OS from sleeping while any agent task is in
   // progress (working/thinking/etc.); allow sleep again once tasks finish.
   keepAwakeWhileWorking: { type: "boolean", default: false },

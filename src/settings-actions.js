@@ -289,6 +289,14 @@ const updateRegistry = {
   freeRoam: requireBoolean("freeRoam"),
   keepSizeAcrossDisplays: requireBoolean("keepSizeAcrossDisplays"),
   mobilePreviewEnabled: requireBoolean("mobilePreviewEnabled"),
+  mobileApprovalsEnabled: requireBoolean("mobileApprovalsEnabled"),
+  mobileTranscriptEnabled: requireBoolean("mobileTranscriptEnabled"),
+  mobileTranscriptToolOutput: requireBoolean("mobileTranscriptToolOutput"),
+  mobileHttpsEnabled: requireBoolean("mobileHttpsEnabled"),
+  mobileCertTrustedHint: requireBoolean("mobileCertTrustedHint"),
+  mobileConnectionMode: requireEnum("mobileConnectionMode", ["lan", "tailscale"]),
+  mobilePort: requireIntegerInRange("mobilePort", 1024, 65535),
+  mobileHttpsPort: requireIntegerInRange("mobileHttpsPort", 1024, 65535),
 
   // ── System-backed prefs (object-form: validate + effect pre-commit gate) ──
   autoStartWithClaude,

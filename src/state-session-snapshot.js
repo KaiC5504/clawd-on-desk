@@ -210,6 +210,7 @@ function buildSessionSnapshotEntry(id, session, sessionAliases = {}, options = {
       ? session.assistantLastOutput
       : null,
     assistantLastOutputTruncated: !!(session && session.assistantLastOutputTruncated === true),
+    hasTranscript: !!(session && session.transcriptPath),
     lastEvent: latestEvent ? {
       labelKey: rawEvent ? (EVENT_LABEL_KEYS[rawEvent] || null) : null,
       rawEvent,
@@ -339,6 +340,7 @@ function sessionSnapshotSignature(snapshot) {
       contextUsage: entry.contextUsage,
       assistantLastOutput: entry.assistantLastOutput,
       assistantLastOutputTruncated: !!entry.assistantLastOutputTruncated,
+      hasTranscript: !!entry.hasTranscript,
       lastEventLabelKey: entry.lastEvent ? entry.lastEvent.labelKey : null,
       lastEventRawEvent: entry.lastEvent ? entry.lastEvent.rawEvent : null,
       lastEventAt: entry.lastEvent ? entry.lastEvent.at : null,

@@ -488,6 +488,10 @@ function registerSettingsIpc(options = {}) {
       const port = lanWsServer.getPort();
       const tok = lanWsServer.getToken();
       if (!Number.isInteger(port) || port <= 0 || typeof tok !== "string" || !tok) {
+        // A recorded bind failure (e.g. the configured port is occupied) is a hard
+        // error to surface in Settings, not an endless "starting…".
+        const bindErr = typeof lanWsServer.getHttpError === "function" ? lanWsServer.getHttpError() : null;
+        if (bindErr) return { status: "error", lastError: bindErr, message: bindErr };
         return { status: "starting", message: "LAN bridge is starting" };
       }
       const os = require("os");
@@ -512,8 +516,7 @@ function registerSettingsIpc(options = {}) {
           if (lanIp !== "127.0.0.1") break;
         }
       }
-      const pairUrl = `http://${lanIp}:${port}/mobile/?host=${lanIp}&port=${port}&token=${tok}`;
-      return { status: "ok", port, token: tok, lanIp, pairUrl };
+      return { status: "ok", port, token: tok, lanIp };
     } catch (err) {
       return { status: "error", message: (err && err.message) || String(err) };
     }
@@ -536,6 +539,183 @@ function registerSettingsIpc(options = {}) {
       if (!lanWsServer) return { status: "error", message: "LAN bridge not available" };
       const newToken = lanWsServer.resetMobileAccess();
       return { status: "ok", token: newToken };
+    } catch (err) {
+      return { status: "error", message: (err && err.message) || String(err) };
+    }
+  });
+
+  // ── v2 interactive-mobile settings ──
+
+  handle("settings:mobile-https-info", async () => {
+    try {
+      const lanWsServer = options.getLanWsServer ? options.getLanWsServer() : null;
+      if (!lanWsServer || typeof lanWsServer.getHttpsInfo !== "function") {
+        return { status: "error", message: "LAN bridge not available" };
+      }
+      return { status: "ok", ...lanWsServer.getHttpsInfo() };
+    } catch (err) {
+      return { status: "error", message: (err && err.message) || String(err) };
+    }
+  });
+
+  handle("settings:mobile-push-status", async () => {
+    try {
+      const lanWsServer = options.getLanWsServer ? options.getLanWsServer() : null;
+      if (!lanWsServer || typeof lanWsServer.getPushStatus !== "function") {
+        return { status: "error", message: "LAN bridge not available" };
+      }
+      return { status: "ok", ...lanWsServer.getPushStatus() };
+    } catch (err) {
+      return { status: "error", message: (err && err.message) || String(err) };
+    }
+  });
+
+  handle("settings:list-mobile-devices", async () => {
+    try {
+      const lanWsServer = options.getLanWsServer ? options.getLanWsServer() : null;
+      if (!lanWsServer || typeof lanWsServer.listDevices !== "function") {
+        return { status: "error", message: "LAN bridge not available" };
+      }
+      return { status: "ok", devices: lanWsServer.listDevices() };
+    } catch (err) {
+      return { status: "error", message: (err && err.message) || String(err) };
+    }
+  });
+
+  handle("settings:revoke-mobile-device", async (_event, deviceId) => {
+    if (typeof deviceId !== "string" || !deviceId) {
+      return { status: "error", message: "deviceId must be a non-empty string" };
+    }
+    try {
+      const lanWsServer = options.getLanWsServer ? options.getLanWsServer() : null;
+      if (!lanWsServer || typeof lanWsServer.revokeDevice !== "function") {
+        return { status: "error", message: "LAN bridge not available" };
+      }
+      const removed = lanWsServer.revokeDevice(deviceId);
+      return { status: "ok", removed: !!removed };
+    } catch (err) {
+      return { status: "error", message: (err && err.message) || String(err) };
+    }
+  });
+
+  handle("settings:set-mobile-device-approvals", async (_event, payload) => {
+    if (!payload || typeof payload !== "object") {
+      return { status: "error", message: "payload must be { deviceId, allowed }" };
+    }
+    const { deviceId, allowed } = payload;
+    if (typeof deviceId !== "string" || !deviceId) {
+      return { status: "error", message: "deviceId must be a non-empty string" };
+    }
+    try {
+      const lanWsServer = options.getLanWsServer ? options.getLanWsServer() : null;
+      if (!lanWsServer || typeof lanWsServer.setDeviceApprovalsAllowed !== "function") {
+        return { status: "error", message: "LAN bridge not available" };
+      }
+      const ok = lanWsServer.setDeviceApprovalsAllowed(deviceId, !!allowed);
+      return { status: "ok", updated: !!ok };
+    } catch (err) {
+      return { status: "error", message: (err && err.message) || String(err) };
+    }
+  });
+
+  handle("settings:set-mobile-device-transcript", async (_event, payload) => {
+    if (!payload || typeof payload !== "object") {
+      return { status: "error", message: "payload must be { deviceId, allowed }" };
+    }
+    const { deviceId, allowed } = payload;
+    if (typeof deviceId !== "string" || !deviceId) {
+      return { status: "error", message: "deviceId must be a non-empty string" };
+    }
+    try {
+      const lanWsServer = options.getLanWsServer ? options.getLanWsServer() : null;
+      if (!lanWsServer || typeof lanWsServer.setDeviceTranscriptAllowed !== "function") {
+        return { status: "error", message: "LAN bridge not available" };
+      }
+      const ok = lanWsServer.setDeviceTranscriptAllowed(deviceId, !!allowed);
+      return { status: "ok", updated: !!ok };
+    } catch (err) {
+      return { status: "error", message: (err && err.message) || String(err) };
+    }
+  });
+
+  // Returns the live pairing code for the phone to type (4+4 OTP boxes). The
+  // code is ephemeral and never persisted; it's the camera-free way the iOS
+  // home-screen app bootstraps its first pairing.
+  handle("settings:mobile-pairing-code", async () => {
+    try {
+      const lanWsServer = options.getLanWsServer ? options.getLanWsServer() : null;
+      if (!lanWsServer || typeof lanWsServer.getPairingCode !== "function") {
+        return { status: "error", message: "LAN bridge not available" };
+      }
+      const port = lanWsServer.getPort();
+      if (!Number.isInteger(port) || port <= 0) {
+        return { status: "starting", message: "LAN bridge is starting" };
+      }
+      const { code, expiresAt } = lanWsServer.getPairingCode();
+      return { status: "ok", code, expiresAt };
+    } catch (err) {
+      return { status: "error", message: (err && err.message) || String(err) };
+    }
+  });
+
+  handle("settings:regenerate-mobile-pairing-code", async () => {
+    try {
+      const lanWsServer = options.getLanWsServer ? options.getLanWsServer() : null;
+      if (!lanWsServer || typeof lanWsServer.regeneratePairingCode !== "function") {
+        return { status: "error", message: "LAN bridge not available" };
+      }
+      const { code, expiresAt } = lanWsServer.regeneratePairingCode();
+      return { status: "ok", code, expiresAt };
+    } catch (err) {
+      return { status: "error", message: (err && err.message) || String(err) };
+    }
+  });
+
+  // QR generation must happen main-side: the sandboxed settings preload can't
+  // require app modules (incl. qrcode). This QR is token-free — it only opens
+  // the PWA in Safari (scan → Add to Home Screen). Pairing is done inside the
+  // installed app with the typed code above, never via a credential in the URL.
+  handle("settings:mobile-pairing-qr", async () => {
+    try {
+      const lanWsServer = options.getLanWsServer ? options.getLanWsServer() : null;
+      if (!lanWsServer) return { status: "error", message: "LAN bridge not available" };
+      const port = lanWsServer.getPort();
+      if (!Number.isInteger(port) || port <= 0) {
+        return { status: "starting", message: "LAN bridge is starting" };
+      }
+
+      const httpsInfo = typeof lanWsServer.getHttpsInfo === "function"
+        ? lanWsServer.getHttpsInfo()
+        : null;
+      const lanIp = typeof lanWsServer.getLocalIP === "function"
+        ? lanWsServer.getLocalIP()
+        : (httpsInfo && httpsInfo.lanIp) || "127.0.0.1";
+      const host = (httpsInfo && httpsInfo.host) || "clawd.local";
+      const httpsReady = !!(httpsInfo && httpsInfo.httpsReady && httpsInfo.httpsPort);
+
+      // Prefer HTTPS so the installed app gets the secure context iOS needs for
+      // the service worker, push, and write-approval.
+      const scheme = httpsReady ? "https" : "http";
+      const usePort = httpsReady ? httpsInfo.httpsPort : port;
+      // The clawd.local variant stays DHCP-resilient (resolved via mDNS, only
+      // advertised while HTTPS is up); the raw-IP variant is the fallback.
+      const buildUrl = (authority) => `${scheme}://${authority}:${usePort}/mobile/`;
+      const hostUrl = buildUrl(httpsReady ? host : lanIp);
+      const ipUrl = buildUrl(lanIp);
+
+      const QRCode = require("qrcode");
+      const qrOpts = { errorCorrectionLevel: "M", margin: 1, width: 240 };
+      const [hostQr, ipQr] = await Promise.all([
+        QRCode.toDataURL(hostUrl, qrOpts),
+        QRCode.toDataURL(ipUrl, qrOpts),
+      ]);
+
+      return {
+        status: "ok",
+        httpsReady,
+        host: { url: hostUrl, qr: hostQr },
+        ip: { url: ipUrl, qr: ipQr },
+      };
     } catch (err) {
       return { status: "error", message: (err && err.message) || String(err) };
     }

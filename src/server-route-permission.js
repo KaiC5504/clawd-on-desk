@@ -275,8 +275,9 @@ function sendHermesPermissionNoDecision(res) {
 }
 
 function startRemoteApproval(ctx, permEntry) {
-  // ExitPlanMode + AskUserQuestion are now eligible: the seam decides whether to
-  // fire (rich agent + an adapter that canHandle the plan/question kind).
+  // ExitPlanMode + AskUserQuestion are now eligible: the seam decides per-surface
+  // whether to fire (rich agent + a surface that can render the plan/question kind
+  // — Discord canHandle or the iPhone PWA; Telegram is filtered out).
   if (typeof ctx.maybeStartRemoteApproval !== "function") return;
   try {
     ctx.maybeStartRemoteApproval(permEntry);
@@ -1095,9 +1096,9 @@ function handlePermissionPost(req, res, options) {
         recordRequestHookEvent.accepted();
         try {
           ctx.showPermissionBubble(permEntry);
-          // Offer the question on any enabled remote channel that can render it
-          // (Discord). No-op for Telegram/local — the desktop bubble still wins
-          // whichever surface answers first.
+          // Offer the question on any enabled remote surface that can render it
+          // (Discord / iPhone PWA). No-op for Telegram/local — the desktop bubble
+          // still wins whichever surface answers first.
           startRemoteApproval(ctx, permEntry);
         } catch (bubbleErr) {
           ctx.permLog(`elicitation bubble failed: ${bubbleErr && bubbleErr.message} -> terminal fallback`);

@@ -154,6 +154,9 @@ describe("server-route-state POST", () => {
         contextUsage: null,
         assistantLastOutput: null,
         assistantLastOutputTruncated: false,
+        currentTool: null,
+        toolSummary: null,
+        transcriptPath: undefined,
         permissionSuspect: true,
         preserveState: true,
         hookSource: "codex-official",
@@ -162,6 +165,29 @@ describe("server-route-state POST", () => {
         stopHookActive: false,
       },
     ]]);
+  });
+
+  it("passes transcript_path to updateSession as transcriptPath", async () => {
+    const res = await callStatePost(JSON.stringify({
+      state: "working",
+      session_id: "sid",
+      event: "PreToolUse",
+      transcript_path: "/home/user/.claude/projects/enc/abc.jsonl",
+    }));
+
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(res.calls.updateSession[0][3].transcriptPath, "/home/user/.claude/projects/enc/abc.jsonl");
+  });
+
+  it("passes undefined transcriptPath when transcript_path is absent", async () => {
+    const res = await callStatePost(JSON.stringify({
+      state: "working",
+      session_id: "sid",
+      event: "PreToolUse",
+    }));
+
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(res.calls.updateSession[0][3].transcriptPath, undefined);
   });
 
   it("passes assistant last output metadata to updateSession", async () => {

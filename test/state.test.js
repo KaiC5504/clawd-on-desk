@@ -1678,6 +1678,36 @@ describe("updateSession()", () => {
     assert.strictEqual(api.sessions.get("s1").sessionTitle, null);
   });
 
+  it("transcriptPath is set when provided", () => {
+    api.updateSession("t1", "working", "SessionStart", {
+      transcriptPath: "/home/user/.claude/projects/enc/abc.jsonl",
+    });
+    assert.strictEqual(api.sessions.get("t1").transcriptPath, "/home/user/.claude/projects/enc/abc.jsonl");
+  });
+
+  it("transcriptPath is replaced by a later non-empty value", () => {
+    api.updateSession("t1", "working", "SessionStart", {
+      transcriptPath: "/home/user/.claude/projects/enc/abc.jsonl",
+    });
+    api.updateSession("t1", "working", "PreToolUse", {
+      transcriptPath: "/home/user/.claude/projects/enc/xyz.jsonl",
+    });
+    assert.strictEqual(api.sessions.get("t1").transcriptPath, "/home/user/.claude/projects/enc/xyz.jsonl");
+  });
+
+  it("transcriptPath is not wiped by an update that omits it", () => {
+    api.updateSession("t1", "working", "SessionStart", {
+      transcriptPath: "/home/user/.claude/projects/enc/abc.jsonl",
+    });
+    api.updateSession("t1", "working", "PreToolUse", {});
+    assert.strictEqual(api.sessions.get("t1").transcriptPath, "/home/user/.claude/projects/enc/abc.jsonl");
+  });
+
+  it("new session with no transcriptPath has null field", () => {
+    update(api, { id: "t1", state: "working" });
+    assert.strictEqual(api.sessions.get("t1").transcriptPath, null);
+  });
+
 });
 
 // ═════════════════════════════════════════════════════════════════════════════

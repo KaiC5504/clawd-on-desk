@@ -642,15 +642,15 @@ describe("server-route-permission POST", () => {
     }
   });
 
-  // ExitPlanMode (plan) and AskUserQuestion (elicitation) now reach the seam;
-  // whether a card actually fires is decided there (rich agent + an adapter that
-  // canHandle the plan/question kind), not at the route.
+  // ExitPlanMode (plan) and AskUserQuestion (elicitation) now forward to the
+  // remote-approval seam; whether a card actually fires is decided there
+  // per-surface (rich agent + a surface that can render the kind — Discord
+  // canHandle / iPhone PWA; Telegram is filtered out), not at the route.
   it("offers remote approval for ExitPlanMode and AskUserQuestion (seam gates the kind)", async () => {
     const cases = [
       { tool_name: "ExitPlanMode", tool_input: { plan: "ship it" } },
       { tool_name: "AskUserQuestion", tool_input: { questions: [] } },
     ];
-
     for (const body of cases) {
       const res = await callPermissionPost(JSON.stringify(body));
       assert.strictEqual(res.ctx.calls.maybeStartRemoteApproval.length, 1, body.tool_name);

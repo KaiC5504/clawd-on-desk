@@ -1223,8 +1223,9 @@ const _permCtx = {
   repositionUpdateBubble: () => repositionUpdateBubble(),
   getTelegramApprovalClient: () => getTelegramApprovalClient(),
   // Remote-approval registry (priority order): Telegram first, then Discord.
-  // permission.js picks the first enabled adapter; the rest of the approval
-  // flow (payload, abort, idempotent resolve) is adapter-agnostic.
+  // permission.js fans the request out to every enabled surface (these plus the
+  // iPhone PWA); the rest of the flow (payload, abort, idempotent resolve) is
+  // adapter-agnostic.
   getRemoteApprovalClients: () => {
     const out = [];
     const tg = getTelegramApprovalClient();
@@ -1233,6 +1234,7 @@ const _permCtx = {
     if (discord) out.push(discord);
     return out;
   },
+  getMobileApprovalClient: () => getMobileApprovalClient(),
   onPermissionsChanged: () => {
     if (hardwareBuddyAdapter) hardwareBuddyAdapter.notifyPermissionsChanged();
   },
@@ -1683,14 +1685,29 @@ const { startHttpServer, getHookServerPort } = _server;
 
 // ── LAN WebSocket bridge for PWA mobile clients (lazy-loaded) ──
 let _lanWss = null;
-if (_settingsController.get("mobilePreviewEnabled") === true) {
+function createLanWss() {
   const { initMobilePreviewServer } = require("./network/mobile-preview-server");
-  _lanWss = initMobilePreviewServer({
+  return initMobilePreviewServer({
     sessions,
     getSettingsSnapshot: () => _settingsController.getSnapshot(),
     isEnabled: () => _settingsController.get("mobilePreviewEnabled") === true,
+    // Lets the phone bring a session's window forward (focus_session message).
+    focusSession: (sessionId, options) => focusDashboardSession(sessionId, options),
   });
 }
+if (_settingsController.get("mobilePreviewEnabled") === true) {
+  _lanWss = createLanWss();
+}
+
+// Remote-approval adapter for the iPhone PWA (mirrors the Telegram client). It
+// reaches the phone through whichever mobile-preview server is currently live.
+const { MobileApprovalClient } = require("./mobile-approval-client");
+const _mobileApprovalClient = new MobileApprovalClient({
+  getTransport: () => (_lanWss && typeof _lanWss.getApprovalTransport === "function")
+    ? _lanWss.getApprovalTransport()
+    : null,
+});
+function getMobileApprovalClient() { return _mobileApprovalClient; }
 
 function updateLog(msg) {
   if (!updateDebugLog) return;
@@ -3153,19 +3170,39 @@ _settingsController.subscribeKey("discordApproval", () => {
 });
 _settingsController.subscribeKey("mobilePreviewEnabled", async (enabled) => {
   if (enabled) {
-    if (!_lanWss) {
-      const { initMobilePreviewServer } = require("./network/mobile-preview-server");
-      _lanWss = initMobilePreviewServer({
-        sessions,
-        getSettingsSnapshot: () => _settingsController.getSnapshot(),
-        isEnabled: () => _settingsController.get("mobilePreviewEnabled") === true,
-      });
-    }
+    if (!_lanWss) _lanWss = createLanWss();
     await _lanWss.start();
   } else if (_lanWss) {
     _lanWss.cleanup();
+    _mobileApprovalClient.stop();
   }
 });
+// HTTPS + approvals toggles reconcile the live server without a full restart
+// (start/stop the TLS listener, lazily generate VAPID keys, etc.).
+function reconcileMobileServer() {
+  if (_lanWss && typeof _lanWss.reconcile === "function") {
+    Promise.resolve(_lanWss.reconcile()).catch(() => {});
+  }
+}
+_settingsController.subscribeKey("mobileHttpsEnabled", () => reconcileMobileServer());
+_settingsController.subscribeKey("mobileApprovalsEnabled", () => reconcileMobileServer());
+
+// A bound port can't be changed in place — the listener has to be torn down and
+// re-created on the new port. No-op when the mobile bridge is disabled.
+let _mobilePortRestartTimer = null;
+function restartMobileServer() {
+  if (_settingsController.get("mobilePreviewEnabled") !== true) return;
+  if (_mobilePortRestartTimer) clearTimeout(_mobilePortRestartTimer);
+  _mobilePortRestartTimer = setTimeout(async () => {
+    _mobilePortRestartTimer = null;
+    if (_settingsController.get("mobilePreviewEnabled") !== true) return;
+    if (_lanWss) { try { _lanWss.cleanup(); } catch {} _mobileApprovalClient.stop(); }
+    _lanWss = createLanWss();
+    try { await _lanWss.start(); } catch (e) { console.error("[mobile-preview] restart failed:", e && e.message); }
+  }, 300);
+}
+_settingsController.subscribeKey("mobilePort", () => restartMobileServer());
+_settingsController.subscribeKey("mobileHttpsPort", () => restartMobileServer());
 
 animationOverridesMain = createSettingsAnimationOverridesMain({
   app,
@@ -3869,6 +3906,7 @@ if (!gotTheLock) {
     _perm.cleanup();
     _server.cleanup();
     if (_lanWss) _lanWss.cleanup();
+    _mobileApprovalClient.stop();
     _updateBubble.cleanup();
     _state.cleanup();
     _tick.cleanup();

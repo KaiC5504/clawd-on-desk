@@ -132,6 +132,17 @@ contextBridge.exposeInMainWorld("settingsAPI", {
   getMobileConnectionInfo: () => ipcRenderer.invoke("settings:mobile-connection-info"),
   regenerateMobileToken: () => ipcRenderer.invoke("settings:regenerate-mobile-token"),
   resetMobileAccess: () => ipcRenderer.invoke("settings:reset-mobile-access"),
+  getMobileHttpsInfo: () => ipcRenderer.invoke("settings:mobile-https-info"),
+  getMobilePushStatus: () => ipcRenderer.invoke("settings:mobile-push-status"),
+  listMobileDevices: () => ipcRenderer.invoke("settings:list-mobile-devices"),
+  revokeMobileDevice: (deviceId) => ipcRenderer.invoke("settings:revoke-mobile-device", deviceId),
+  setMobileDeviceApprovals: (deviceId, allowed) =>
+    ipcRenderer.invoke("settings:set-mobile-device-approvals", { deviceId, allowed }),
+  setMobileDeviceTranscript: (deviceId, allowed) =>
+    ipcRenderer.invoke("settings:set-mobile-device-transcript", { deviceId, allowed }),
+  getMobilePairingQr: () => ipcRenderer.invoke("settings:mobile-pairing-qr"),
+  getMobilePairingCode: () => ipcRenderer.invoke("settings:mobile-pairing-code"),
+  regenerateMobilePairingCode: () => ipcRenderer.invoke("settings:regenerate-mobile-pairing-code"),
   onChanged: (cb) => {
     if (typeof cb === "function") listeners.add(cb);
   },

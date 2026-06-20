@@ -77,7 +77,9 @@ let DISPLAY_HINT_MAP = {};
 // ── Session tracking ──
 const sessions = new Map();
 const MAX_SESSIONS = 20;
-const ASSISTANT_OUTPUT_MAX = 2400;
+// Lockstep with the hook/route caps (3000). The phone's transcript-allowed detail
+// view shows up to this length; the desktop reads the same stored value.
+const ASSISTANT_OUTPUT_MAX = 3000;
 const CODEX_EXIT_PROBE_DELAYS_MS = [1000, 3000, 8000, 15000];
 // PostCompact intentionally excluded (#406): compaction finishing is not a turn
 // completion, so it must not flip awaitingInputSinceStop.
@@ -1085,6 +1087,9 @@ function updateSession(sessionId, state, event, opts = {}) {
     contextUsage = null,
     assistantLastOutput = null,
     assistantLastOutputTruncated = false,
+    currentTool = null,
+    toolSummary = null,
+    transcriptPath = undefined,
     permissionSuspect = false,
     preserveState = false,
     hookSource = null,
@@ -1216,6 +1221,24 @@ function updateSession(sessionId, state, event, opts = {}) {
   const srcContextUsage = normalizeContextUsage(contextUsage) || (existing && existing.contextUsage) || null;
   const srcAssistantLastOutput = normalizeAssistantOutput(assistantLastOutput);
   const srcAssistantLastOutputTruncated = !!(srcAssistantLastOutput && assistantLastOutputTruncated === true);
+  // Current-tool label for the detail screen's "now: <target>" line. A tool event
+  // carrying a tool_name sets it; Stop/idle ends the turn and clears it so the
+  // line disappears. Other events keep whatever the last tool event stored.
+  const isTurnEnd = event === "Stop" || event === "SessionEnd";
+  const srcCurrentTool = isTurnEnd
+    ? null
+    : (typeof currentTool === "string" && currentTool
+        ? currentTool
+        : (existing && existing.currentTool) || null);
+  const srcToolSummary = isTurnEnd
+    ? null
+    : (typeof toolSummary === "string" && toolSummary
+        ? toolSummary
+        : (currentTool ? null : (existing && existing.toolSummary) || null));
+  // Raw path stays server-internal; never forwarded to the wire.
+  const srcTranscriptPath = (typeof transcriptPath === "string" && transcriptPath)
+    ? transcriptPath
+    : (existing && existing.transcriptPath) || null;
   const srcResumeState = (existing && existing.resumeState) || null;
   const isSubagentStart = event === "SubagentStart" || event === "subagentStart";
   const isSubagentStop = event === "SubagentStop" || event === "subagentStop";
@@ -1321,7 +1344,7 @@ function updateSession(sessionId, state, event, opts = {}) {
   const srcLastStopAt = isStopBoundary
     ? Date.now()
     : (existing && Number.isFinite(existing.lastStopAt) ? existing.lastStopAt : null);
-  const base = { sourcePid: srcPid, wtHwnd: srcWtHwnd, cwd: srcCwd, editor: srcEditor, pidChain: srcPidChain, tmuxSocket: srcTmuxSocket, tmuxClient: srcTmuxClient, agentPid: srcAgentPid, agentId: srcAgentId, host: srcHost, headless: srcHeadless, platform: srcPlatform, model: srcModel, provider: srcProvider, codexOriginator: srcCodexOriginator, codexSource: srcCodexSource, ghosttyTerminalId: srcGhosttyTerminalId, sessionTitle: srcSessionTitle, contextUsage: srcContextUsage, assistantLastOutput: srcAssistantLastOutput, assistantLastOutputTruncated: srcAssistantLastOutputTruncated, recentEvents, pidReachable, lastToolBoundaryAt: srcLastToolBoundaryAt, lastStopAt: srcLastStopAt, awaitingInputSinceStop: resolveAwaitingInputSinceStop(existing, event), muteNotificationSound: state === "notification" && muteNotificationSound === true };
+  const base = { sourcePid: srcPid, wtHwnd: srcWtHwnd, cwd: srcCwd, editor: srcEditor, pidChain: srcPidChain, tmuxSocket: srcTmuxSocket, tmuxClient: srcTmuxClient, agentPid: srcAgentPid, agentId: srcAgentId, host: srcHost, headless: srcHeadless, platform: srcPlatform, model: srcModel, provider: srcProvider, codexOriginator: srcCodexOriginator, codexSource: srcCodexSource, ghosttyTerminalId: srcGhosttyTerminalId, sessionTitle: srcSessionTitle, contextUsage: srcContextUsage, assistantLastOutput: srcAssistantLastOutput, assistantLastOutputTruncated: srcAssistantLastOutputTruncated, currentTool: srcCurrentTool, toolSummary: srcToolSummary, transcriptPath: srcTranscriptPath, recentEvents, pidReachable, lastToolBoundaryAt: srcLastToolBoundaryAt, lastStopAt: srcLastStopAt, awaitingInputSinceStop: resolveAwaitingInputSinceStop(existing, event), muteNotificationSound: state === "notification" && muteNotificationSound === true };
   if (preserveCompletionAck) base.requiresCompletionAck = true;
 
   // Evict oldest session if at capacity and this is a new session.
