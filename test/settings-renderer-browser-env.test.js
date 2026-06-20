@@ -3057,8 +3057,8 @@ describe("settings renderer browser environment", () => {
     assert.ok(coreSource.includes("row-label-danger"));
     assert.ok(css.includes(".row-label.row-label-danger"));
     // Simple title + localized confirm strings exist.
-    assert.ok(i18nSource.includes('rowAutoApproveAll: "Auto-pilot"'));
-    assert.ok(i18nSource.includes('rowAutoApproveAll: "自动驾驶"'));
+    assert.ok(i18nSource.includes('rowAutoApproveAll: "Auto-approve all requests"'));
+    assert.ok(i18nSource.includes('rowAutoApproveAll: "自动放行所有请求"'));
     assert.ok(i18nSource.includes("autoApproveAllConfirmTitle"));
     // Lives in its own Permissions section, not under Bubbles.
     assert.ok(generalSource.includes('t("sectionPermissions")'));
@@ -3784,6 +3784,8 @@ describe("settings renderer browser environment", () => {
     assert.ok(tabSource.includes("handleRemoveCodexPet"));
     assert.ok(tabSource.includes("themeUninstallPetLabel"));
     assert.ok(tabSource.includes('footer.className = "theme-card-footer";'));
+    assert.ok(tabSource.includes('caps.powerProfile === "scripted"'));
+    assert.ok(tabSource.includes("themeCapabilityFineMotion"));
     assert.ok(tabSource.includes('if (!theme.active) indicator.setAttribute("aria-hidden", "true");'));
     assert.ok(!tabSource.includes("if (theme.active || canDelete || canRemoveCodexPet)"));
     assert.ok(coreSource.includes("codexPetZipImportPending"));
@@ -3821,7 +3823,9 @@ describe("settings renderer browser environment", () => {
     assert.ok(strings.en.themeImportUserThemeZipHint.includes("theme.json"));
     assert.strictEqual(strings.en.themeOpenUserThemesFolder, "Open themes folder");
     assert.strictEqual(strings.en.themeRefreshThemes, "Refresh themes");
+    assert.strictEqual(strings.en.themeCapabilityFineMotion, "Fine motion");
     assert.strictEqual(strings.zh.themeImportPetZip, "导入 Codex Pet 包（.zip）");
+    assert.strictEqual(strings.zh.themeCapabilityFineMotion, "精细动效");
     assert.strictEqual(strings.zh.themeActionGroupCodexPets, "Codex Pets");
     assert.strictEqual(strings.zh.themeImportUserThemeZip, "导入 Clawd 主题包（.zip）");
     assert.ok(strings.zh.themeImportUserThemeZipHint.includes("theme.json"));
