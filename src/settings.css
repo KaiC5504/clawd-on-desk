@@ -1549,6 +1549,14 @@ html, body {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+/* Destructive variant — mirrors .accent's tinted shape but in red, so a
+   delete/reset reads as risky without dropping out of the soft-btn family. */
+.soft-btn.danger {
+  color: #d64545;
+  background: rgba(214, 69, 69, 0.1);
+  border-color: rgba(214, 69, 69, 0.26);
+}
+.soft-btn.danger:hover:not(:disabled) { border-color: rgba(214, 69, 69, 0.55); }
 
 /* ── Shortcuts ── */
 .shortcuts-head {
@@ -3574,19 +3582,6 @@ html, body {
   gap: 8px;
   margin-top: 12px;
 }
-.mobile-action-btn {
-  font-size: 11px;
-  background: var(--sidebar-hover);
-  border: 1px solid var(--border, #3f3f46);
-  border-radius: 4px;
-  padding: 5px 14px;
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: background 0.15s;
-}
-.mobile-action-btn:hover { background: var(--accent); color: #fff; }
-.mobile-action-danger { border-color: var(--red, #7f1d1d); color: var(--red, #fca5a5); }
-.mobile-action-danger:hover { background: var(--red, #7f1d1d); color: #fff; }
 
 /* v2 interactive mobile sections */
 .mobile-conn-mode-select {
@@ -3623,6 +3618,14 @@ html, body {
   font-weight: 600;
   color: var(--text-primary);
   margin: 0 0 10px;
+}
+/* Give the advanced collapsible the same top-rule divider as the titled
+   subsections, and drop the inherited .row bottom border so it doesn't draw a
+   second line against the Push subsection's own top rule below it. */
+.mobile-advanced-group.collapsible-group {
+  margin-top: 18px;
+  border-top: 1px solid var(--border);
+  border-bottom: none;
 }
 .mobile-https-info {
   margin-top: 4px;

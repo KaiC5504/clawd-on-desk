@@ -10,7 +10,6 @@
   let runtime = null;
   let helpers = null;
   let state = null;
-  let infoContainer = null;
   let v2Container = null;
   let httpsInfoContainer = null;
   let devicesContainer = null;
@@ -106,8 +105,8 @@
 
       // Action buttons
       html += '<div class="mobile-conn-actions">';
-      html += `<button class="mobile-action-btn" id="mobile-regenerate-btn">${escapeHtml(t("mobileRegenerate") || "Regenerate Token")}</button>`;
-      html += `<button class="mobile-action-btn mobile-action-danger" id="mobile-reset-btn">${escapeHtml(t("mobileReset") || "Reset Mobile Access")}</button>`;
+      html += `<button class="soft-btn accent" id="mobile-regenerate-btn">${escapeHtml(t("mobileRegenerate") || "Regenerate Token")}</button>`;
+      html += `<button class="soft-btn danger" id="mobile-reset-btn">${escapeHtml(t("mobileReset") || "Reset Mobile Access")}</button>`;
       html += '</div>';
 
       container.innerHTML = html;
@@ -313,7 +312,7 @@
       const dlSlot = container.querySelector(".mobile-cert-download");
       if (dlSlot) {
         const a = document.createElement("a");
-        a.className = "mobile-action-btn";
+        a.className = "soft-btn accent";
         a.textContent = t("mobileCertDownload");
         // Open the CA over the plain-HTTP monitoring origin so the phone can
         // fetch it before it trusts anything. Build from the connection info.
@@ -411,7 +410,7 @@
       html += `</div>`;
       html += `<p class="mobile-paircode-instructions">${escapeHtml(t("mobilePairCodeInstructions"))}</p>`;
       html += `<p class="mobile-paircode-hint">${escapeHtml(t("mobilePairCodeHint"))}</p>`;
-      html += `<button class="mobile-action-btn" id="mobile-newcode-btn">${escapeHtml(t("mobilePairNewCode"))}</button>`;
+      html += `<button class="soft-btn accent" id="mobile-newcode-btn">${escapeHtml(t("mobilePairNewCode"))}</button>`;
       container.innerHTML = html;
 
       const newBtn = container.querySelector("#mobile-newcode-btn");
@@ -517,7 +516,7 @@
     controls.appendChild(transcriptWrap);
 
     const revokeBtn = document.createElement("button");
-    revokeBtn.className = "mobile-action-btn mobile-action-danger";
+    revokeBtn.className = "soft-btn danger";
     revokeBtn.textContent = t("mobileDeviceRevoke");
     revokeBtn.addEventListener("click", () => {
       if (!window.confirm(t("mobileDeviceRevokeConfirm"))) return;
@@ -558,6 +557,18 @@
     });
   }
 
+  // A titled group divided by a top rule. Returns the section; append the
+  // group's body straight onto it.
+  function buildSubsection(titleKey) {
+    const section = document.createElement("div");
+    section.className = "mobile-subsection";
+    const title = document.createElement("h4");
+    title.className = "mobile-subsection-title";
+    title.textContent = t(titleKey);
+    section.appendChild(title);
+    return section;
+  }
+
   function renderV2Sections() {
     if (!v2Container) return;
     v2Container.innerHTML = "";
@@ -565,106 +576,105 @@
 
     if (!mobileEnabled()) return;
 
-    // 1. Approvals toggle
-    v2Container.appendChild(helpers.buildSwitchRow({
-      key: "mobileApprovalsEnabled",
-      labelKey: "mobileApprovalsToggle",
-      descKey: "mobileApprovalsToggleDesc",
-    }));
-
-    // 1b. Transcript toggles
-    v2Container.appendChild(helpers.buildSwitchRow({
-      key: "mobileTranscriptEnabled",
-      labelKey: "mobileTranscriptToggle",
-      descKey: "mobileTranscriptToggleDesc",
-    }));
-    // Only meaningful when the transcript feature is enabled
-    if (snapshot().mobileTranscriptEnabled === true) {
-      v2Container.appendChild(helpers.buildSwitchRow({
-        key: "mobileTranscriptToolOutput",
-        labelKey: "mobileTranscriptOutputToggle",
-        descKey: "mobileTranscriptOutputToggleDesc",
-      }));
-    }
-
-    // 2. Connection mode
-    v2Container.appendChild(buildConnectionModeRow());
-
-    // 2b. Fixed ports (drift-proof reconnect — see buildPortRow)
-    v2Container.appendChild(buildPortRow("mobilePort", "mobilePortTitle", "mobilePortDesc"));
-    v2Container.appendChild(buildPortRow("mobileHttpsPort", "mobileHttpsPortTitle", "mobileHttpsPortDesc"));
-    const portErrSlot = document.createElement("div");
-    portErrSlot.className = "mobile-port-error";
-    v2Container.appendChild(portErrSlot);
-    renderPortBindError(portErrSlot);
-
-    // 3. HTTPS toggle + cert panel
-    v2Container.appendChild(helpers.buildSwitchRow({
-      key: "mobileHttpsEnabled",
-      labelKey: "mobileHttpsToggle",
-      descKey: "mobileHttpsToggleDesc",
-    }));
-    httpsInfoContainer = document.createElement("div");
-    httpsInfoContainer.className = "mobile-https-info";
-    v2Container.appendChild(httpsInfoContainer);
-    renderHttpsInfo();
-
-    // 4. Pairing code (primary, camera-free pairing)
-    const codeSection = document.createElement("div");
-    codeSection.className = "mobile-subsection";
-    const codeTitle = document.createElement("h4");
-    codeTitle.className = "mobile-subsection-title";
-    codeTitle.textContent = t("mobilePairTitle");
-    codeSection.appendChild(codeTitle);
+    // Pair a phone — the camera-free code is the everyday path, so it leads.
+    const codeSection = buildSubsection("mobilePairTitle");
     pairingCodeContainer = document.createElement("div");
     pairingCodeContainer.className = "mobile-paircode-container";
     codeSection.appendChild(pairingCodeContainer);
     v2Container.appendChild(codeSection);
     renderPairingCode();
 
-    // 5. Install QR — token-free "scan to open the app, then Add to Home Screen"
-    const pairSection = document.createElement("div");
-    pairSection.className = "mobile-subsection";
-    const pairTitle = document.createElement("h4");
-    pairTitle.className = "mobile-subsection-title";
-    pairTitle.textContent = t("mobileInstallTitle");
-    pairSection.appendChild(pairTitle);
+    // Install or Connect — token-free "scan to open the app, then Add to Home Screen".
+    const installSection = buildSubsection("mobileInstallTitle");
     const qrBtn = document.createElement("button");
-    qrBtn.className = "mobile-action-btn";
+    qrBtn.className = "soft-btn accent";
     qrBtn.textContent = qrVisible ? t("mobilePairHideQr") : t("mobilePairShowQr");
     qrBtn.addEventListener("click", () => {
       qrVisible = !qrVisible;
       qrBtn.textContent = qrVisible ? t("mobilePairHideQr") : t("mobilePairShowQr");
       renderQr();
     });
-    pairSection.appendChild(qrBtn);
+    installSection.appendChild(qrBtn);
     qrContainer = document.createElement("div");
     qrContainer.className = "mobile-qr-container";
-    pairSection.appendChild(qrContainer);
-    v2Container.appendChild(pairSection);
+    installSection.appendChild(qrContainer);
+    v2Container.appendChild(installSection);
     renderQr();
 
-    // 6. Device manager
-    const devSection = document.createElement("div");
-    devSection.className = "mobile-subsection";
-    const devTitle = document.createElement("h4");
-    devTitle.className = "mobile-subsection-title";
-    devTitle.textContent = t("mobileDevicesTitle");
-    devicesTitleEl = devTitle;
-    devSection.appendChild(devTitle);
+    // Paired devices.
+    const devSection = buildSubsection("mobileDevicesTitle");
+    devicesTitleEl = devSection.querySelector(".mobile-subsection-title");
     devicesContainer = document.createElement("div");
     devicesContainer.className = "mobile-devices-container";
     devSection.appendChild(devicesContainer);
     v2Container.appendChild(devSection);
     renderDevices();
 
-    // 7. Push status
-    const pushSection = document.createElement("div");
-    pushSection.className = "mobile-subsection";
-    const pushTitle = document.createElement("h4");
-    pushTitle.className = "mobile-subsection-title";
-    pushTitle.textContent = t("mobilePushTitle");
-    pushSection.appendChild(pushTitle);
+    // Phone permissions — what a paired phone is allowed to do.
+    const permsSection = buildSubsection("mobilePermsTitle");
+    permsSection.appendChild(helpers.buildSwitchRow({
+      key: "mobileApprovalsEnabled",
+      labelKey: "mobileApprovalsToggle",
+      descKey: "mobileApprovalsToggleDesc",
+    }));
+    permsSection.appendChild(helpers.buildSwitchRow({
+      key: "mobileTranscriptEnabled",
+      labelKey: "mobileTranscriptToggle",
+      descKey: "mobileTranscriptToggleDesc",
+    }));
+    // Only meaningful when the transcript feature is enabled
+    if (snapshot().mobileTranscriptEnabled === true) {
+      permsSection.appendChild(helpers.buildSwitchRow({
+        key: "mobileTranscriptToolOutput",
+        labelKey: "mobileTranscriptOutputToggle",
+        descKey: "mobileTranscriptOutputToggleDesc",
+      }));
+    }
+    v2Container.appendChild(permsSection);
+
+    // Connection & security — first-time setup / troubleshooting, collapsed by
+    // default so the everyday pairing controls above stay uncluttered.
+    const portErrSlot = document.createElement("div");
+    portErrSlot.className = "mobile-port-error";
+    httpsInfoContainer = document.createElement("div");
+    httpsInfoContainer.className = "mobile-https-info";
+    const connDetailsTitle = document.createElement("div");
+    connDetailsTitle.className = "mobile-cert-title";
+    connDetailsTitle.textContent = t("mobileConnDetailsTitle");
+    const connInfoContainer = document.createElement("div");
+    connInfoContainer.id = "mobile-connection-info";
+
+    const advanced = helpers.buildCollapsibleGroup({
+      id: "mobileAdvanced",
+      title: t("mobileAdvancedTitle"),
+      desc: t("mobileAdvancedDesc"),
+      defaultCollapsed: true,
+      className: "mobile-advanced-group",
+      children: [
+        buildConnectionModeRow(),
+        // Fixed ports keep a paired phone reconnecting — see buildPortRow.
+        buildPortRow("mobilePort", "mobilePortTitle", "mobilePortDesc"),
+        buildPortRow("mobileHttpsPort", "mobileHttpsPortTitle", "mobileHttpsPortDesc"),
+        portErrSlot,
+        helpers.buildSwitchRow({
+          key: "mobileHttpsEnabled",
+          labelKey: "mobileHttpsToggle",
+          descKey: "mobileHttpsToggleDesc",
+        }),
+        httpsInfoContainer,
+        connDetailsTitle,
+        connInfoContainer,
+      ],
+    });
+    v2Container.appendChild(advanced);
+    // Populate the async slots once the group is in the tree (their renderers
+    // bail unless the node already has a parent).
+    renderPortBindError(portErrSlot);
+    renderHttpsInfo();
+    renderConnectionInfo(connInfoContainer);
+
+    // Push notifications.
+    const pushSection = buildSubsection("mobilePushTitle");
     pushContainer = document.createElement("div");
     pushContainer.className = "mobile-push-container";
     pushSection.appendChild(pushContainer);
@@ -697,19 +707,14 @@
       descKey: "mobileToggleDesc",
     }));
 
-    // Connection info (re-renders on toggle)
-    infoContainer = document.createElement("div");
-    infoContainer.id = "mobile-connection-info";
-    section.appendChild(infoContainer);
-
-    // v2 interactive features (approvals, HTTPS, QR pairing, devices, push)
+    // Everything else (pairing, install, devices, permissions, advanced, push)
+    // lives below the toggle and only renders while the bridge is enabled.
     v2Container = document.createElement("div");
     v2Container.id = "mobile-v2-sections";
     section.appendChild(v2Container);
 
     container.appendChild(section);
 
-    renderConnectionInfo(infoContainer);
     renderV2Sections();
 
     // Re-render on relevant pref changes. mobilePreviewEnabled gates everything;
@@ -721,7 +726,6 @@
         if (!evt || !evt.changes) return;
         const c = evt.changes;
         if (Object.prototype.hasOwnProperty.call(c, "mobilePreviewEnabled")) {
-          if (infoContainer) renderConnectionInfo(infoContainer);
           renderV2Sections();
           return;
         }
