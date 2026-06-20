@@ -1623,6 +1623,9 @@ html, body {
 .anim-override-subtabs {
   margin-bottom: 14px;
 }
+.discord-subtabs {
+  margin-bottom: 14px;
+}
 .anim-override-meta-label {
   font-size: 12px;
   color: var(--text-secondary);

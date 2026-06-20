@@ -58,7 +58,7 @@
       const next = updated ? { configured: !!result.configured, masked: result.masked || "" } : previous;
       const changed = updated && tokenInfoKey(previous) !== tokenInfoKey(next);
       if (updated) view.tokenInfo = next;
-      if ((forceRender || changed) && state.activeTab === "discord-approval") {
+      if ((forceRender || changed) && state.activeTab === "discord" && state.discordSubtab === "approval") {
         ops.requestRender({ content: true });
       }
     });
@@ -112,12 +112,10 @@
     return tokenOk && DISCORD_ID_RE.test(cfg.ownerUserId);
   }
 
-  function render(parent) {
+  // Renders the Approval sub-view body (no h1 — the Discord tab wrapper owns the
+  // panel title and the sub-tab switcher above this).
+  function renderBody(parent) {
     refreshTokenInfo();
-
-    const h1 = document.createElement("h1");
-    h1.textContent = t("discordApprovalTitle");
-    parent.appendChild(h1);
 
     const subtitle = document.createElement("p");
     subtitle.className = "subtitle";
@@ -402,8 +400,7 @@
     state = core.state;
     helpers = core.helpers;
     ops = core.ops;
-    core.tabs["discord-approval"] = { render };
   }
 
-  root.ClawdSettingsTabDiscordApproval = { init };
+  root.ClawdSettingsTabDiscordApproval = { init, renderBody };
 })(globalThis);

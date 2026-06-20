@@ -66,18 +66,11 @@ const ICONS = {
     '<path d="M22 2 15 22l-4-9-9-4 20-7Z"/>' +
     '</svg>',
 
-  // gamepad (rich presence)
-  "discord-presence":
+  // gamepad (Discord — presence + approval)
+  discord:
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" width="100%" height="100%">' +
     '<path d="M6 11h4M8 9v4M15 11h.01M18 13h.01"/>' +
     '<path d="M17.32 5H6.68a4 4 0 0 0-3.95 3.34l-1.21 7.27A2.5 2.5 0 0 0 4 18.5a2.5 2.5 0 0 0 2-1l.6-.8a2 2 0 0 1 1.6-.8h7.6a2 2 0 0 1 1.6.8l.6.8a2.5 2.5 0 0 0 2 1 2.5 2.5 0 0 0 2.48-2.89l-1.21-7.27A4 4 0 0 0 17.32 5Z"/>' +
-    '</svg>',
-
-  // shield (remote approval)
-  "discord-approval":
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" width="100%" height="100%">' +
-    '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/>' +
-    '<path d="m9 12 2 2 4-4"/>' +
     '</svg>',
 
   // plug

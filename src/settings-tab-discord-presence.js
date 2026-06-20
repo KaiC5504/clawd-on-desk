@@ -58,11 +58,9 @@
     });
   }
 
-  function render(parent) {
-    const h1 = document.createElement("h1");
-    h1.textContent = t("discordPresenceTitle");
-    parent.appendChild(h1);
-
+  // Renders the Rich Presence sub-view body (no h1 — the Discord tab wrapper
+  // owns the panel title and the sub-tab switcher above this).
+  function renderBody(parent) {
     const subtitle = document.createElement("p");
     subtitle.className = "subtitle";
     subtitle.textContent = t("discordPresenceSubtitle");
@@ -246,8 +244,7 @@
     state = core.state;
     helpers = core.helpers;
     ops = core.ops;
-    core.tabs["discord-presence"] = { render };
   }
 
-  root.ClawdSettingsTabDiscordPresence = { init };
+  root.ClawdSettingsTabDiscordPresence = { init, renderBody };
 })(globalThis);

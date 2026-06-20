@@ -90,7 +90,7 @@
     },
     "win": {
       "icon": "assets/icon.ico",
-      "signAndEditExecutable": false,
+      "signAndEditExecutable": true,
       "artifactName": "Clawd-on-Desk-Setup-${version}-${arch}.${ext}",
       "target": [
         {
