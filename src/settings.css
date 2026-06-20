@@ -920,6 +920,10 @@ html, body {
   .switch::after {
     transition: none;
   }
+  .mobile-device-allow input[type="checkbox"],
+  .mobile-device-allow input[type="checkbox"]::after {
+    transition: none;
+  }
 }
 
 /* ── Size slider (volume-style; drag/pending affordances from the preview
@@ -3727,6 +3731,54 @@ html, body {
   font-size: 12px;
   color: var(--text-secondary);
   cursor: pointer;
+}
+/* Per-device permission boxes — restyled from the raw browser checkbox into the
+   switch/soft-btn family: rounded box, accent gloss-gradient fill + white check
+   when on, accent border on hover, accent focus ring. */
+.mobile-device-allow input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  display: grid;
+  place-content: center;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  border-radius: 5px;
+  /* A gradient (not a solid color) forces Chromium's custom appearance:none
+     paint path; with a solid background-color the native control bleeds through
+     and renders light in dark mode. */
+  background: linear-gradient(var(--bg), var(--bg));
+  box-shadow: inset 0 0 0 1px var(--border), inset 0 1px 2px rgba(0, 0, 0, 0.08);
+  cursor: pointer;
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+/* Grid-centered so the glyph sits dead-center; translateY is the small optical
+   nudge for the check's lower-left visual weight after the 45deg rotation. */
+.mobile-device-allow input[type="checkbox"]::after {
+  content: "";
+  width: 4px;
+  height: 8px;
+  border: solid var(--switch-knob);
+  border-width: 0 2px 2px 0;
+  transform: translateY(-1px) rotate(45deg) scale(0.5);
+  opacity: 0;
+  transition: opacity 0.14s ease, transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.mobile-device-allow input[type="checkbox"]:not(:checked):hover {
+  box-shadow: inset 0 0 0 1px var(--accent), inset 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+.mobile-device-allow input[type="checkbox"]:checked {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0)), var(--switch-on);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.18);
+}
+.mobile-device-allow input[type="checkbox"]:checked::after {
+  opacity: 1;
+  transform: translateY(-1px) rotate(45deg) scale(1);
+}
+.mobile-device-allow input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .mobile-push-line {
   font-size: 13px;
