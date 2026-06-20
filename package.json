@@ -5,6 +5,7 @@
   "main": "src/main.js",
   "scripts": {
     "start": "node scripts/ensure-sidecar-binaries.js && node launch.js",
+    "promote": "node scripts/promote-local.js",
     "build": "electron-builder --win",
     "build:win:x64": "electron-builder --win nsis:x64",
     "build:win:arm64": "electron-builder --win nsis:arm64",
