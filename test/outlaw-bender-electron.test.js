@@ -16,23 +16,19 @@ function electronExecutable() {
   }
 }
 
-test("real SVG getCTM motion stays inside the declared accessory envelope", { timeout: 90_000 }, (t) => {
+test("outlaw bender completes and restarts in Electron's object SVG channel", { timeout: 30_000 }, (t) => {
   const executable = electronExecutable();
   if (!executable) return t.skip("Electron executable is not installed");
   if (process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
-    return t.skip("Electron SVG audit needs an X11/Wayland display (CI can use xvfb-run)");
+    return t.skip("Electron bender audit needs an X11/Wayland display (CI can use xvfb-run)");
   }
 
-  const fixture = path.join(__dirname, "fixtures", "accessory-motion-electron.js");
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-accessory-motion-electron-"));
+  const fixture = path.join(__dirname, "fixtures", "outlaw-bender-electron.js");
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-bender-electron-"));
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
   const args = ["--disable-gpu"];
   args.push(`--user-data-dir=${profile}`);
-  // GitHub's Ubuntu runner cannot satisfy Chromium's setuid helper ownership
-  // contract inside the workspace. The audit loads only repository-local SVGs
-  // in a disposable hidden window, so disabling the sandbox for this child
-  // test process is both scoped and deterministic.
   if (process.platform === "linux") args.push("--no-sandbox");
   args.push(fixture);
   let result;
@@ -40,7 +36,7 @@ test("real SVG getCTM motion stays inside the declared accessory envelope", { ti
     result = spawnSync(executable, args, {
       env,
       encoding: "utf8",
-      timeout: 85_000,
+      timeout: 25_000,
     });
   } finally {
     const tempRoot = `${path.resolve(os.tmpdir())}${path.sep}`;
