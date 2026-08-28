@@ -16,19 +16,21 @@ function electronExecutable() {
   }
 }
 
-test("outlaw bender completes and restarts in Electron's production object SVG channel", { timeout: 30_000 }, (t) => {
+test("cigarette SMIL advances and restarts in the production mouth object channel", { timeout: 30_000 }, (t) => {
   const executable = electronExecutable();
   if (!executable) return t.skip("Electron executable is not installed");
   if (process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
-    return t.skip("Electron bender audit needs an X11/Wayland display (CI can use xvfb-run)");
+    return t.skip("Electron cigarette audit needs an X11/Wayland display (CI can use xvfb-run)");
   }
 
-  const fixture = path.join(__dirname, "fixtures", "outlaw-bender-electron.js");
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-bender-electron-"));
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "index.html"), "utf8");
+  assert.match(source, /<object id="clawd-mouth-accessory"[^>]*type="image\/svg\+xml"/);
+
+  const fixture = path.join(__dirname, "fixtures", "cigarette-accessory-electron.js");
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-cigarette-electron-"));
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
-  const args = ["--disable-gpu"];
-  args.push(`--user-data-dir=${profile}`);
+  const args = ["--disable-gpu", `--user-data-dir=${profile}`];
   if (process.platform === "linux") args.push("--no-sandbox");
   args.push(fixture);
   let result;
